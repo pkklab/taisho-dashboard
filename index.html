@@ -20,47 +20,32 @@
         <div id="tide-display" class="value">INITIALIZING...</div>
         <div class="label">TAISHO WIND SPEED</div>
         <div id="wind-display" class="value">WAITING...</div>
-        <div id="status">STATUS: STARTING SYSTEM...</div>
+        <div id="status">STATUS: CONNECTING TO TAISHO...</div>
     </div>
     <div id="guide">DRAG: ROTATE / SCROLL: ZOOM</div>
 
     <script>
-        // --- システム変数 ---
         var liveTide = 120;
-        var liveWind = 4.2;
-        var isDataLoaded = false;
+        var liveWind = 3.0;
+        var isLive = false;
 
-        // --- 1. シーン構築 ---
         var scene = new THREE.Scene();
         var camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
         var renderer = new THREE.WebGLRenderer({ antialias: true });
         renderer.setSize(window.innerWidth, window.innerHeight);
         document.body.appendChild(renderer.domElement);
 
-        // カメラ位置
         camera.position.set(0, -6, 10);
+        var controls = new THREE.OrbitControls(camera, renderer.domElement);
 
-        // マウス操作 (OrbitControls) - エラー回避用の記述
-        var controls;
-        if (THREE.OrbitControls) {
-            controls = new THREE.OrbitControls(camera, renderer.domElement);
-        }
-
-        // --- 2. ビジュアル要素 ---
-        // グリッド
         scene.add(new THREE.GridHelper(20, 20, 0x004466, 0x001122).rotateX(Math.PI/2));
-
-        // 大正区の輪郭
         var points = [new THREE.Vector3(0,3,0), new THREE.Vector3(-2,1,0), new THREE.Vector3(-2.5,-2,0), new THREE.Vector3(0,-3.5,0), new THREE.Vector3(2.5,-2,0), new THREE.Vector3(2,1,0), new THREE.Vector3(0,3,0)];
         scene.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(points), new THREE.LineBasicMaterial({ color: 0x0088ff })));
-
-        // ランドマーク（光の柱）
         [{p:[0,3,0], c:0xffffff}, {p:[0.5,1.5,0], c:0xffffff}, {p:[0,-0.5,0], c:0x00ff88}].forEach(l => {
             var m = new THREE.Mesh(new THREE.CylinderGeometry(0.02, 0.05, 10, 8), new THREE.MeshBasicMaterial({color:l.c, transparent:true, opacity:0.3}));
             m.position.set(l.p[0], l.p[1], 0); m.rotation.x = Math.PI/2; scene.add(m);
         });
 
-        // パーティクル
         var pCount = 2000;
         var pGeo = new THREE.BufferGeometry();
         var pPos = new Float32Array(pCount * 3);
@@ -69,63 +54,61 @@
         var particles = new THREE.Points(pGeo, new THREE.PointsMaterial({ color: 0x00f2ff, size: 0.03, transparent: true, opacity: 0.5 }));
         scene.add(particles);
 
-        // コア
         var core = new THREE.Mesh(new THREE.OctahedronGeometry(1, 0), new THREE.MeshPhongMaterial({ color: 0x00f2ff, wireframe: true }));
         scene.add(core);
         var light = new THREE.PointLight(0xffffff, 1, 100); light.position.set(5,5,5); scene.add(light);
         scene.add(new THREE.AmbientLight(0x222222));
 
-        // --- 3. データ取得関数 ---
+        // --- 本物のデータを取得する関数 ---
         async function fetchRealData() {
             try {
-                const res = await fetch('https://api.open-meteo.com/v1/forecast?latitude=34.65&longitude=135.43&current=wind_speed_10m&hourly=tide_height');
-                const data = await res.json();
+                // 大阪港の座標 (34.65, 135.43) の海洋データを取得
+                const response = await fetch('https://marine-api.open-meteo.com/v1/marine?latitude=34.65&longitude=135.43&hourly=tide_height&current_weather=true');
+                const data = await response.json();
                 
-                // 風速の反映
-                liveWind = data.current.wind_speed_10m;
-                document.getElementById('wind-display').innerText = "WIND: " + liveWind + " m/s";
+                // 現在時刻の潮位
+                const nowHour = new Date().getHours();
+                liveTide = data.hourly.tide_height[nowHour] * 100; // メートルをセンチに
                 
-                // 潮位の反映
-                var now = new Date().getHours();
-                if(data.hourly && data.hourly.tide_height) {
-                    liveTide = data.hourly.tide_height[now] * 100;
-                }
+                // 現在の風速
+                liveWind = data.current_weather.windspeed;
                 
-                document.getElementById('status').innerText = "LIVE DATA CONNECTED";
-                isDataLoaded = true;
+                document.getElementById('wind-display').innerText = "WIND: " + liveWind + " km/h";
+                document.getElementById('status').innerText = "STATUS: LIVE DATA ACTIVE";
+                document.getElementById('status').style.color = "#00f2ff";
+                isLive = true;
             } catch (e) {
-                document.getElementById('status').innerText = "SIMULATION MODE (API OFFLINE)";
+                console.log(e);
+                document.getElementById('status').innerText = "STATUS: SIMULATION MODE";
+                document.getElementById('status').style.color = "#ffaa00";
             }
         }
 
-        // --- 4. メインループ (何があってもこれを動かす) ---
         function animate() {
             requestAnimationFrame(animate);
             var time = Date.now() * 0.001;
             
-            // 潮位表示の更新（取得前はサイン波でダミーを動かす）
-            var displayTide = isDataLoaded ? liveTide : 120 + Math.sin(time * 0.5) * 80;
-            document.getElementById('tide-display').innerText = "TIDE: " + displayTide.toFixed(1) + " cm";
+            // データが取れていればその値を、取れていなければシミュレーション（サイン波）を使う
+            var currentTide = isLive ? liveTide : 120 + Math.sin(time * 0.5) * 80;
+            document.getElementById('tide-display').innerText = "TIDE: " + currentTide.toFixed(1) + " cm";
 
-            // コアの脈動
-            core.scale.setScalar(0.5 + displayTide/250);
+            core.scale.setScalar(0.5 + currentTide/250);
             core.rotation.y += 0.01;
 
-            // パーティクルの流れ
             var pos = particles.geometry.attributes.position.array;
+            var windSpeedFactor = liveWind * 0.005; 
             for(let i=0; i<pCount; i++) {
-                pos[i*3] -= (liveWind * 0.01);
+                pos[i*3] -= windSpeedFactor; 
                 if(pos[i*3] < -10) pos[i*3] = 10;
             }
             particles.geometry.attributes.position.needsUpdate = true;
-
-            if (controls) controls.update();
+            controls.update();
             renderer.render(scene, camera);
         }
 
-        // 実行開始
         animate();
-        fetchRealData(); // アニメーション開始後にデータを呼びに行く
+        fetchRealData();
+        setInterval(fetchRealData, 600000); // 10分おきに更新
 
         window.addEventListener('resize', function() {
             camera.aspect = window.innerWidth / window.innerHeight;
