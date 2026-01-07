@@ -1,129 +1,338 @@
 <!DOCTYPE html>
 <html lang="ja">
 <head>
-    <meta charset="UTF-8">
-    <title>TAISHO LIVE-DATA DASHBOARD</title>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
-    <script src="https://unpkg.com/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
-    <style>
-        body { margin: 0; background: #000205; overflow: hidden; font-family: 'Courier New', sans-serif; }
-        #ui { position: absolute; top: 20px; left: 20px; color: #00f2ff; pointer-events: none; z-index: 10; }
-        .label { font-size: 10px; letter-spacing: 3px; color: #0088aa; }
-        .value { font-size: 24px; font-weight: bold; text-shadow: 0 0 15px #00f2ff; margin-bottom: 5px; }
-        #status { font-size: 11px; background: rgba(0,242,255,0.1); padding: 5px; color: #00f2ff; }
-        #guide { position: absolute; bottom: 20px; right: 20px; color: #00f2ff; font-size: 10px; opacity: 0.5; }
-    </style>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1.0" />
+  <title>TAISHO LIVE-DATA DASHBOARD</title>
+
+  <!-- three.js (non-module) -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  <script src="https://unpkg.com/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+
+  <style>
+    body { margin:0; background:#000205; overflow:hidden; font-family:'Courier New', monospace; }
+    #ui { position:absolute; top:20px; left:20px; color:#00f2ff; pointer-events:none; z-index:10; }
+    .label { font-size:10px; letter-spacing:3px; color:#0088aa; }
+    .value { font-size:24px; font-weight:bold; text-shadow:0 0 15px #00f2ff; margin-bottom:6px; }
+    #status { font-size:11px; background:rgba(0,242,255,0.08); padding:8px 10px; color:#00f2ff; display:inline-block; line-height:1.6; }
+    #guide { position:absolute; bottom:18px; right:18px; color:#00f2ff; font-size:10px; opacity:0.5; }
+    #tiny { font-size:10px; color:#00a9b8; letter-spacing:1px; }
+  </style>
 </head>
+
 <body>
-    <div id="ui">
-        <div class="label">OSAKA PORT REAL-TIME</div>
-        <div id="tide-display" class="value">INITIALIZING...</div>
-        <div class="label">TAISHO WIND SPEED</div>
-        <div id="wind-display" class="value">WAITING...</div>
-        <div id="status">STATUS: CONNECTING TO TAISHO...</div>
+  <div id="ui">
+    <div class="label">OSAKA PORT REAL-TIME</div>
+    <div id="tide-display" class="value">INITIALIZING...</div>
+
+    <div class="label">TAISHO WIND SPEED</div>
+    <div id="wind-display" class="value">WAITING...</div>
+
+    <div id="status">
+      STATUS: BOOTING...
+      <div id="tiny">LAST UPDATE: --:-- / MODE: SIM</div>
     </div>
-    <div id="guide">DRAG: ROTATE / SCROLL: ZOOM</div>
+  </div>
+  <div id="guide">DRAG: ROTATE / SCROLL: ZOOM</div>
 
-    <script>
-        var liveTide = 120;
-        var liveWind = 3.0;
-        var isTideLive = false;
-        var isWindLive = false;
+<script>
+(() => {
+  // =========================
+  // Config
+  // =========================
+  const LAT = 34.65;
+  const LON = 135.43;
 
-        var scene = new THREE.Scene();
-        var camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
-        var renderer = new THREE.WebGLRenderer({ antialias: true });
-        renderer.setSize(window.innerWidth, window.innerHeight);
-        document.body.appendChild(renderer.domElement);
+  const FETCH_INTERVAL_MS = 10 * 60 * 1000; // 10分
+  const FETCH_TIMEOUT_MS  = 8000;           // 通信タイムアウト
+  const WIND_UNIT = "ms";
 
-        camera.position.set(0, -6, 10);
-        var controls = new THREE.OrbitControls(camera, renderer.domElement);
+  // 表示・演出の係数
+  const CORE_SCALE_BASE = 0.55;
+  const CORE_SCALE_TIDE_DIV = 260; // 潮位cmで割る
+  const PARTICLE_BASE_SPEED = 0.05;
+  const PARTICLE_WIND_SPEED_FACTOR = 0.02;
 
-        scene.add(new THREE.GridHelper(20, 20, 0x004466, 0x001122).rotateX(Math.PI/2));
-        var points = [new THREE.Vector3(0,3,0), new THREE.Vector3(-2,1,0), new THREE.Vector3(-2.5,-2,0), new THREE.Vector3(0,-3.5,0), new THREE.Vector3(2.5,-2,0), new THREE.Vector3(2,1,0), new THREE.Vector3(0,3,0)];
-        scene.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(points), new THREE.LineBasicMaterial({ color: 0x0088ff })));
-        
-        // ランドマーク（昭和山など）
-        [{p:[0,3,0], c:0xffffff}, {p:[0.5,1.5,0], c:0xffffff}, {p:[0,-0.5,0], c:0x00ff88}].forEach(l => {
-            var m = new THREE.Mesh(new THREE.CylinderGeometry(0.02, 0.05, 10, 8), new THREE.MeshBasicMaterial({color:l.c, transparent:true, opacity:0.3}));
-            m.position.set(l.p[0], l.p[1], 0); m.rotation.x = Math.PI/2; scene.add(m);
-        });
+  // =========================
+  // State
+  // =========================
+  let liveTideCm = 120;       // cm
+  let liveWindMs = 3.0;       // m/s
+  let isTideLive = false;
+  let isWindLive = false;
+  let lastUpdateStr = "--:--";
 
-        // パーティクル（風）
-        var pCount = 2000;
-        var pGeo = new THREE.BufferGeometry();
-        var pPos = new Float32Array(pCount * 3);
-        for(let i=0; i<pCount*3; i++) pPos[i] = (Math.random()-0.5)*20;
-        pGeo.setAttribute('position', new THREE.BufferAttribute(pPos, 3));
-        var particles = new THREE.Points(pGeo, new THREE.PointsMaterial({ color: 0x00f2ff, size: 0.03, transparent: true, opacity: 0.5 }));
-        scene.add(particles);
+  // fallback波（通信失敗時のシミュレーション）
+  const sim = {
+    tideBase: 120,
+    tideAmp: 80,
+    tideFreq: 0.5
+  };
 
-        // コア
-        var core = new THREE.Mesh(new THREE.OctahedronGeometry(1, 0), new THREE.MeshPhongMaterial({ color: 0x00f2ff, wireframe: true }));
-        scene.add(core);
-        scene.add(new THREE.PointLight(0xffffff, 1, 100).clone().set(5,5,5));
-        scene.add(new THREE.AmbientLight(0x222222));
+  // =========================
+  // UI helpers
+  // =========================
+  const $tide   = document.getElementById("tide-display");
+  const $wind   = document.getElementById("wind-display");
+  const $status = document.getElementById("status");
+  const $tiny   = document.getElementById("tiny");
 
-        // --- データの二重取得 ---
-        async function fetchRealData() {
-            // 1. 潮位データの取得 (Marine API)
-            try {
-                const res = await fetch('https://marine-api.open-meteo.com/v1/marine?latitude=34.65&longitude=135.43&hourly=tide_height');
-                const data = await res.json();
-                const nowHour = new Date().getHours();
-                liveTide = data.hourly.tide_height[nowHour] * 100;
-                isTideLive = true;
-            } catch (e) { console.error("Tide error", e); }
+  function setStatus(line1, modeText) {
+    // line1: "STATUS: ...."
+    // modeText: "LIVE" or "SIM" etc.
+    $status.firstChild.nodeValue = line1;
+    $tiny.textContent = `LAST UPDATE: ${lastUpdateStr} / MODE: ${modeText}`;
+  }
 
-            // 2. 風速データの取得 (Forecast API)
-            try {
-                const res = await fetch('https://api.open-meteo.com/v1/forecast?latitude=34.65&longitude=135.43&current=wind_speed_10m&wind_speed_unit=ms');
-                const data = await res.json();
-                liveWind = data.current.wind_speed_10m;
-                document.getElementById('wind-display').innerText = "WIND: " + liveWind.toFixed(1) + " m/s";
-                isWindLive = true;
-            } catch (e) { console.error("Wind error", e); }
+  function nowHHMM() {
+    const d = new Date();
+    const hh = String(d.getHours()).padStart(2, "0");
+    const mm = String(d.getMinutes()).padStart(2, "0");
+    return `${hh}:${mm}`;
+  }
 
-            if(isTideLive && isWindLive) {
-                document.getElementById('status').innerText = "STATUS: FULL LIVE DATA ACTIVE";
-                document.getElementById('status').style.color = "#00f2ff";
-            } else {
-                document.getElementById('status').innerText = "STATUS: PARTIAL SIMULATION";
-            }
+  // =========================
+  // three.js setup
+  // =========================
+  const scene = new THREE.Scene();
+
+  const camera = new THREE.PerspectiveCamera(
+    75,
+    window.innerWidth / window.innerHeight,
+    0.1,
+    1000
+  );
+  camera.position.set(0, -6, 10);
+
+  const renderer = new THREE.WebGLRenderer({ antialias: true });
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+  document.body.appendChild(renderer.domElement);
+
+  const controls = new THREE.OrbitControls(camera, renderer.domElement);
+  controls.enableDamping = true;
+  controls.dampingFactor = 0.06;
+
+  // Grid
+  const grid = new THREE.GridHelper(20, 20, 0x004466, 0x001122);
+  grid.rotateX(Math.PI / 2);
+  scene.add(grid);
+
+  // Outline (港湾っぽい輪郭)
+  const points = [
+    new THREE.Vector3(0, 3, 0),
+    new THREE.Vector3(-2, 1, 0),
+    new THREE.Vector3(-2.5, -2, 0),
+    new THREE.Vector3(0, -3.5, 0),
+    new THREE.Vector3(2.5, -2, 0),
+    new THREE.Vector3(2, 1, 0),
+    new THREE.Vector3(0, 3, 0),
+  ];
+  const outline = new THREE.Line(
+    new THREE.BufferGeometry().setFromPoints(points),
+    new THREE.LineBasicMaterial({ color: 0x0088ff })
+  );
+  scene.add(outline);
+
+  // Landmarks (柱)
+  [
+    { p: [0, 3, 0],   c: 0xffffff },
+    { p: [0.5, 1.5, 0], c: 0xffffff },
+    { p: [0, -0.5, 0], c: 0x00ff88 },
+  ].forEach(l => {
+    const m = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.02, 0.05, 10, 8),
+      new THREE.MeshBasicMaterial({ color: l.c, transparent: true, opacity: 0.3 })
+    );
+    m.position.set(l.p[0], l.p[1], 0);
+    m.rotation.x = Math.PI / 2;
+    scene.add(m);
+  });
+
+  // Particles (Wind)
+  const pCount = 2000;
+  const pGeo = new THREE.BufferGeometry();
+  const pPos = new Float32Array(pCount * 3);
+  for (let i = 0; i < pCount; i++) {
+    const base = i * 3;
+    pPos[base + 0] = (Math.random() - 0.5) * 20; // x
+    pPos[base + 1] = (Math.random() - 0.5) * 20; // y
+    pPos[base + 2] = (Math.random() - 0.5) * 20; // z
+  }
+  pGeo.setAttribute("position", new THREE.BufferAttribute(pPos, 3));
+  const particles = new THREE.Points(
+    pGeo,
+    new THREE.PointsMaterial({ color: 0x00f2ff, size: 0.03, transparent: true, opacity: 0.5 })
+  );
+  scene.add(particles);
+
+  // Core
+  const core = new THREE.Mesh(
+    new THREE.OctahedronGeometry(1, 0),
+    new THREE.MeshPhongMaterial({ color: 0x00f2ff, wireframe: true })
+  );
+  scene.add(core);
+
+  // Lights（ここが元コードの致命的停止ポイントだった）
+  const light = new THREE.PointLight(0xffffff, 1, 100);
+  light.position.set(5, 5, 5);
+  scene.add(light);
+  scene.add(new THREE.AmbientLight(0x222222));
+
+  // Resize
+  window.addEventListener("resize", () => {
+    camera.aspect = window.innerWidth / window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+  });
+
+  // =========================
+  // fetch helpers (timeout付き)
+  // =========================
+  async function fetchJsonWithTimeout(url, timeoutMs) {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), timeoutMs);
+    try {
+      const res = await fetch(url, { signal: ctrl.signal, cache: "no-store" });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      return await res.json();
+    } finally {
+      clearTimeout(t);
+    }
+  }
+
+  function findClosestHourIndex(times, now = new Date()) {
+    // times: ["2026-01-07T00:00", ...]
+    // “いま”に最も近い時間のindexを返す
+    const nowMs = now.getTime();
+    let bestIdx = 0;
+    let bestDiff = Infinity;
+    for (let i = 0; i < times.length; i++) {
+      const t = Date.parse(times[i]);
+      if (!Number.isFinite(t)) continue;
+      const diff = Math.abs(t - nowMs);
+      if (diff < bestDiff) {
+        bestDiff = diff;
+        bestIdx = i;
+      }
+    }
+    return bestIdx;
+  }
+
+  // =========================
+  // Data fetch (tide + wind)
+  // =========================
+  async function fetchRealData() {
+    setStatus("STATUS: CONNECTING TO TAISHO...", (isTideLive || isWindLive) ? "LIVE" : "SIM");
+
+    // 1) Tide (Open-Meteo Marine)
+    try {
+      const urlTide =
+        `https://marine-api.open-meteo.com/v1/marine?latitude=${LAT}&longitude=${LON}&hourly=tide_height`;
+      const data = await fetchJsonWithTimeout(urlTide, FETCH_TIMEOUT_MS);
+
+      const times = data?.hourly?.time;
+      const tides = data?.hourly?.tide_height;
+
+      if (Array.isArray(times) && Array.isArray(tides) && times.length && tides.length) {
+        const idx = findClosestHourIndex(times, new Date());
+        const tideM = Number(tides[idx]);
+        if (Number.isFinite(tideM)) {
+          liveTideCm = tideM * 100; // m -> cm
+          isTideLive = true;
+        } else {
+          isTideLive = false;
         }
+      } else {
+        isTideLive = false;
+      }
+    } catch (e) {
+      console.error("Tide fetch error:", e);
+      isTideLive = false;
+    }
 
-        function animate() {
-            requestAnimationFrame(animate);
-            var time = Date.now() * 0.001;
-            
-            // 潮位の反映
-            var currentTide = isTideLive ? liveTide : 120 + Math.sin(time * 0.5) * 80;
-            document.getElementById('tide-display').innerText = "TIDE: " + currentTide.toFixed(1) + " cm";
+    // 2) Wind (Open-Meteo Forecast current)
+    try {
+      const urlWind =
+        `https://api.open-meteo.com/v1/forecast?latitude=${LAT}&longitude=${LON}&current=wind_speed_10m&wind_speed_unit=${WIND_UNIT}`;
+      const data = await fetchJsonWithTimeout(urlWind, FETCH_TIMEOUT_MS);
 
-            core.scale.setScalar(0.5 + currentTide/250);
-            core.rotation.y += 0.01;
+      const w = Number(data?.current?.wind_speed_10m);
+      if (Number.isFinite(w)) {
+        liveWindMs = w;
+        isWindLive = true;
+      } else {
+        isWindLive = false;
+      }
+    } catch (e) {
+      console.error("Wind fetch error:", e);
+      isWindLive = false;
+    }
 
-            // 風速の反映（パーティクルの速さ）
-            var pos = particles.geometry.attributes.position.array;
-            var speed = isWindLive ? liveWind * 0.02 : 0.05; 
-            for(let i=0; i<pCount; i++) {
-                pos[i*3] -= speed; 
-                if(pos[i*3] < -10) pos[i*3] = 10;
-            }
-            particles.geometry.attributes.position.needsUpdate = true;
-            controls.update();
-            renderer.render(scene, camera);
-        }
+    // status update
+    lastUpdateStr = nowHHMM();
+    const mode = (isTideLive && isWindLive) ? "FULL LIVE" : (isTideLive || isWindLive) ? "PARTIAL LIVE" : "SIM";
+    if (mode === "FULL LIVE") {
+      setStatus("STATUS: FULL LIVE DATA ACTIVE", "LIVE");
+      $status.style.color = "#00f2ff";
+    } else if (mode === "PARTIAL LIVE") {
+      setStatus("STATUS: PARTIAL LIVE (FALLBACK MIX)", "MIX");
+      $status.style.color = "#00f2ff";
+    } else {
+      setStatus("STATUS: SIMULATION MODE (NO DATA)", "SIM");
+      $status.style.color = "#00f2ff";
+    }
+  }
 
-        animate();
-        fetchRealData();
-        setInterval(fetchRealData, 600000);
+  // =========================
+  // Animation loop
+  // =========================
+  function animate() {
+    requestAnimationFrame(animate);
 
-        window.addEventListener('resize', function() {
-            camera.aspect = window.innerWidth / window.innerHeight;
-            camera.updateProjectionMatrix();
-            renderer.setSize(window.innerWidth, window.innerHeight);
-        });
-    </script>
+    const time = Date.now() * 0.001;
+
+    // Tide
+    const currentTideCm = isTideLive
+      ? liveTideCm
+      : (sim.tideBase + Math.sin(time * sim.tideFreq) * sim.tideAmp);
+
+    $tide.textContent = `TIDE: ${currentTideCm.toFixed(1)} cm`;
+
+    // Wind
+    $wind.textContent = `WIND: ${liveWindMs.toFixed(1)} m/s` + (isWindLive ? "" : " (SIM)");
+
+    // Core reacts to tide
+    const scale = CORE_SCALE_BASE + (currentTideCm / CORE_SCALE_TIDE_DIV);
+    core.scale.setScalar(scale);
+    core.rotation.y += 0.01;
+    core.rotation.x += 0.002;
+
+    // Particles react to wind
+    const pos = particles.geometry.attributes.position.array;
+    const speed = (isWindLive ? (liveWindMs * PARTICLE_WIND_SPEED_FACTOR) : PARTICLE_BASE_SPEED);
+
+    // x方向へ流す
+    for (let i = 0; i < pCount; i++) {
+      const base = i * 3;
+      pos[base + 0] -= speed;
+      if (pos[base + 0] < -10) pos[base + 0] = 10;
+    }
+    particles.geometry.attributes.position.needsUpdate = true;
+
+    controls.update();
+    renderer.render(scene, camera);
+  }
+
+  // =========================
+  // Boot
+  // =========================
+  setStatus("STATUS: BOOTING...", "SIM");
+  animate();              // 先に必ず回す（通信失敗でも止まらない）
+  fetchRealData();        // 初回取得
+  setInterval(fetchRealData, FETCH_INTERVAL_MS);
+
+})();
+</script>
 </body>
 </html>
