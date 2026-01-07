@@ -47,20 +47,27 @@
   const FETCH_TIMEOUT_MS  = 8000;           // 通信タイムアウト
   const WIND_UNIT = "ms";
 
-  // 表示・演出の係数
+  // 演出の係数
   const CORE_SCALE_BASE = 0.55;
   const CORE_SCALE_TIDE_DIV = 260; // 潮位cmで割る
   const PARTICLE_BASE_SPEED = 0.05;
   const PARTICLE_WIND_SPEED_FACTOR = 0.02;
 
+  // 潮位のスムージング（LIVE値へ追従する速度）
+  // 0.03〜0.10あたりで好みに調整OK（大きいほど追従が速い）
+  const TIDE_FOLLOW = 0.06;
+
   // =========================
   // State
   // =========================
-  let liveTideCm = 120;       // cm
   let liveWindMs = 3.0;       // m/s
   let isTideLive = false;
   let isWindLive = false;
   let lastUpdateStr = "--:--";
+
+  // Tide: APIで得た「目標値」と、画面に出す「追従値」
+  let targetTideCm  = 120;
+  let displayTideCm = 120;
 
   // fallback波（通信失敗時のシミュレーション）
   const sim = {
@@ -78,8 +85,6 @@
   const $tiny   = document.getElementById("tiny");
 
   function setStatus(line1, modeText) {
-    // line1: "STATUS: ...."
-    // modeText: "LIVE" or "SIM" etc.
     $status.firstChild.nodeValue = line1;
     $tiny.textContent = `LAST UPDATE: ${lastUpdateStr} / MODE: ${modeText}`;
   }
@@ -118,7 +123,7 @@
   grid.rotateX(Math.PI / 2);
   scene.add(grid);
 
-  // Outline (港湾っぽい輪郭)
+  // Outline
   const points = [
     new THREE.Vector3(0, 3, 0),
     new THREE.Vector3(-2, 1, 0),
@@ -134,11 +139,11 @@
   );
   scene.add(outline);
 
-  // Landmarks (柱)
+  // Landmarks
   [
-    { p: [0, 3, 0],   c: 0xffffff },
+    { p: [0, 3, 0],     c: 0xffffff },
     { p: [0.5, 1.5, 0], c: 0xffffff },
-    { p: [0, -0.5, 0], c: 0x00ff88 },
+    { p: [0, -0.5, 0],  c: 0x00ff88 },
   ].forEach(l => {
     const m = new THREE.Mesh(
       new THREE.CylinderGeometry(0.02, 0.05, 10, 8),
@@ -155,9 +160,9 @@
   const pPos = new Float32Array(pCount * 3);
   for (let i = 0; i < pCount; i++) {
     const base = i * 3;
-    pPos[base + 0] = (Math.random() - 0.5) * 20; // x
-    pPos[base + 1] = (Math.random() - 0.5) * 20; // y
-    pPos[base + 2] = (Math.random() - 0.5) * 20; // z
+    pPos[base + 0] = (Math.random() - 0.5) * 20;
+    pPos[base + 1] = (Math.random() - 0.5) * 20;
+    pPos[base + 2] = (Math.random() - 0.5) * 20;
   }
   pGeo.setAttribute("position", new THREE.BufferAttribute(pPos, 3));
   const particles = new THREE.Points(
@@ -173,7 +178,7 @@
   );
   scene.add(core);
 
-  // Lights（ここが元コードの致命的停止ポイントだった）
+  // Lights (安定版)
   const light = new THREE.PointLight(0xffffff, 1, 100);
   light.position.set(5, 5, 5);
   scene.add(light);
@@ -202,8 +207,6 @@
   }
 
   function findClosestHourIndex(times, now = new Date()) {
-    // times: ["2026-01-07T00:00", ...]
-    // “いま”に最も近い時間のindexを返す
     const nowMs = now.getTime();
     let bestIdx = 0;
     let bestDiff = Infinity;
@@ -220,12 +223,12 @@
   }
 
   // =========================
-  // Data fetch (tide + wind)
+  // Data fetch
   // =========================
   async function fetchRealData() {
     setStatus("STATUS: CONNECTING TO TAISHO...", (isTideLive || isWindLive) ? "LIVE" : "SIM");
 
-    // 1) Tide (Open-Meteo Marine)
+    // 1) Tide
     try {
       const urlTide =
         `https://marine-api.open-meteo.com/v1/marine?latitude=${LAT}&longitude=${LON}&hourly=tide_height`;
@@ -238,7 +241,7 @@
         const idx = findClosestHourIndex(times, new Date());
         const tideM = Number(tides[idx]);
         if (Number.isFinite(tideM)) {
-          liveTideCm = tideM * 100; // m -> cm
+          targetTideCm = tideM * 100;   // ★ 目標値だけ更新（表示は追従）
           isTideLive = true;
         } else {
           isTideLive = false;
@@ -251,7 +254,7 @@
       isTideLive = false;
     }
 
-    // 2) Wind (Open-Meteo Forecast current)
+    // 2) Wind
     try {
       const urlWind =
         `https://api.open-meteo.com/v1/forecast?latitude=${LAT}&longitude=${LON}&current=wind_speed_10m&wind_speed_unit=${WIND_UNIT}`;
@@ -272,6 +275,7 @@
     // status update
     lastUpdateStr = nowHHMM();
     const mode = (isTideLive && isWindLive) ? "FULL LIVE" : (isTideLive || isWindLive) ? "PARTIAL LIVE" : "SIM";
+
     if (mode === "FULL LIVE") {
       setStatus("STATUS: FULL LIVE DATA ACTIVE", "LIVE");
       $status.style.color = "#00f2ff";
@@ -292,27 +296,32 @@
 
     const time = Date.now() * 0.001;
 
-    // Tide
-    const currentTideCm = isTideLive
-      ? liveTideCm
-      : (sim.tideBase + Math.sin(time * sim.tideFreq) * sim.tideAmp);
+    // --- Tide (LIVEは追従 / SIMはサイン波) ---
+    let currentTideCm;
+    if (isTideLive) {
+      // ★ サイン波みたいな一定速度じゃなく、「目標値に向かって寄る」動きになる
+      displayTideCm += (targetTideCm - displayTideCm) * TIDE_FOLLOW;
+      currentTideCm = displayTideCm;
+    } else {
+      currentTideCm = sim.tideBase + Math.sin(time * sim.tideFreq) * sim.tideAmp;
+      displayTideCm = currentTideCm;
+    }
 
-    $tide.textContent = `TIDE: ${currentTideCm.toFixed(1)} cm`;
+    $tide.textContent = `TIDE: ${currentTideCm.toFixed(1)} cm` + (isTideLive ? " (LIVE)" : " (SIM)");
 
-    // Wind
-    $wind.textContent = `WIND: ${liveWindMs.toFixed(1)} m/s` + (isWindLive ? "" : " (SIM)");
+    // --- Wind ---
+    $wind.textContent = `WIND: ${liveWindMs.toFixed(1)} m/s` + (isWindLive ? " (LIVE)" : " (SIM)");
 
-    // Core reacts to tide
+    // --- Core reacts to tide ---
     const scale = CORE_SCALE_BASE + (currentTideCm / CORE_SCALE_TIDE_DIV);
     core.scale.setScalar(scale);
     core.rotation.y += 0.01;
     core.rotation.x += 0.002;
 
-    // Particles react to wind
+    // --- Particles react to wind ---
     const pos = particles.geometry.attributes.position.array;
     const speed = (isWindLive ? (liveWindMs * PARTICLE_WIND_SPEED_FACTOR) : PARTICLE_BASE_SPEED);
 
-    // x方向へ流す
     for (let i = 0; i < pCount; i++) {
       const base = i * 3;
       pos[base + 0] -= speed;
@@ -328,8 +337,8 @@
   // Boot
   // =========================
   setStatus("STATUS: BOOTING...", "SIM");
-  animate();              // 先に必ず回す（通信失敗でも止まらない）
-  fetchRealData();        // 初回取得
+  animate();        // 先に回す（fetch失敗でも止まらない）
+  fetchRealData();  // 初回取得
   setInterval(fetchRealData, FETCH_INTERVAL_MS);
 
 })();
