@@ -3,17 +3,18 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>WALL RESIDUE — (ALWAYS BEEN HERE)</title>
+  <title>WALL RESIDUE — WET SURFACE</title>
   <style>
     html, body { margin:0; height:100%; background:#0b0b0b; overflow:hidden; }
     canvas { display:block; width:100vw; height:100vh; }
-    /* ひと目でLIVE/SIMが分かるが、説明はしない＝刻印 */
+
+    /* LIVE/SIM の刻印（説明しないが、ひと目で判別） */
     #stamp{
       position:fixed; left:12px; top:10px;
       font-family: ui-monospace, Menlo, Monaco, "Courier New", monospace;
       font-size:10px; letter-spacing:1px;
-      color: rgba(20,20,20,0.55);
-      background: rgba(245,238,227,0.35);
+      color: rgba(20,20,20,0.60);
+      background: rgba(245,238,227,0.40);
       border: 1px solid rgba(20,20,20,0.12);
       padding: 4px 6px;
       border-radius: 8px;
@@ -24,65 +25,86 @@
     #dot{
       display:inline-block; width:7px; height:7px; border-radius:999px;
       margin-right:6px; vertical-align:middle;
-      background: rgba(60,60,60,0.55);
+      background: rgba(70,55,18,0.60);
     }
     #stamp small{ opacity:0.65; margin-left:6px; }
+
+    /* 何か落ちたら表示する（公共空間向けの保険） */
+    #err{
+      position:fixed; left:12px; bottom:12px; right:12px;
+      font-family: ui-monospace, Menlo, Monaco, "Courier New", monospace;
+      font-size:11px; line-height:1.35;
+      color: rgba(255,255,255,0.85);
+      background: rgba(0,0,0,0.35);
+      border: 1px solid rgba(255,255,255,0.12);
+      padding: 8px 10px;
+      border-radius: 10px;
+      white-space: pre-wrap;
+      display:none;
+      pointer-events:none;
+    }
   </style>
 </head>
 <body>
   <div id="stamp"><span id="dot"></span><span id="mode">SIM</span><small id="age"></small></div>
+  <div id="err"></div>
   <canvas id="c"></canvas>
 
 <script>
 (() => {
+  const errBox = document.getElementById("err");
+  function showErr(msg){
+    errBox.style.display = "block";
+    errBox.textContent = msg;
+  }
+  window.addEventListener("error", (e)=>{
+    showErr("ERROR:\n" + (e?.message || "unknown") + "\n" + (e?.filename || "") + ":" + (e?.lineno || "") );
+  });
+  window.addEventListener("unhandledrejection", (e)=>{
+    showErr("PROMISE ERROR:\n" + (e?.reason?.message || String(e?.reason || "unknown")) );
+  });
+
   // =========================================================
   // 0) Canvas
   // =========================================================
   const canvas = document.getElementById("c");
   const ctx = canvas.getContext("2d", { alpha:false });
 
-  // 描画は低解像度→拡大して“壁の粒”を作る（サイバー感を消す）
-  const SIMRES = { w: 260, h: 160 }; // 見た目の粒度（端末で自動調整）
-  let simW = SIMRES.w, simH = SIMRES.h;
-
   const simCanvas = document.createElement("canvas");
   const sctx = simCanvas.getContext("2d");
+  let simW = 260, simH = 160;
   let img, pix;
 
   function resize(){
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
     canvas.width  = Math.floor(window.innerWidth  * dpr);
     canvas.height = Math.floor(window.innerHeight * dpr);
-    canvas.style.width  = "100vw";
-    canvas.style.height = "100vh";
 
-    // 端末性能に応じてシム解像度を少し動かす
     const area = window.innerWidth * window.innerHeight;
     const scale = area > 1500000 ? 1.15 : area < 650000 ? 0.90 : 1.0;
-    simW = Math.max(180, Math.floor(SIMRES.w * scale));
-    simH = Math.max(120, Math.floor(SIMRES.h * scale));
+    simW = Math.max(180, Math.floor(260 * scale));
+    simH = Math.max(120, Math.floor(160 * scale));
 
     simCanvas.width = simW;
     simCanvas.height = simH;
     img = sctx.createImageData(simW, simH);
     pix = img.data;
+
+    allocFields();
+    seedAsAlreadyHere();
   }
-  window.addEventListener("resize", resize);
+  window.addEventListener("resize", resize, { passive:true });
   resize();
 
   // =========================================================
   // 1) ENV (live or sim) — Morioka default
-  //    "壁が受け取る環境" として：湿度/降水/風
   // =========================================================
   const ENV = {
     name: "MORIOKA",
     lat: 39.7036, lon: 141.1527,
     wind_ms: 2.0, humidity: 62, precip_mm: 0.0,
     live: false, lastUpdate: 0,
-
-    // 取れない時も“受け入れる”ためのSIM入力（季節演出ではなく壁の湿り）
     sim: { wind_ms: 2.0, humidity: 66, precip_mm: 0.05 },
-
     interval_ms: 10 * 60 * 1000,
     timeout_ms: 8000,
   };
@@ -100,8 +122,21 @@
     } finally { clearTimeout(t); }
   }
 
+  function updateStamp(){
+    const modeEl = document.getElementById("mode");
+    const dotEl  = document.getElementById("dot");
+    const ageEl  = document.getElementById("age");
+
+    modeEl.textContent = ENV.live ? "LIVE" : "SIM";
+    dotEl.style.background = ENV.live
+      ? "rgba(20,60,35,0.65)"
+      : "rgba(70,55,18,0.60)";
+
+    const mins = ENV.lastUpdate ? Math.max(0, Math.floor((Date.now()-ENV.lastUpdate)/60000)) : 0;
+    ageEl.textContent = ENV.lastUpdate ? `${mins}m` : "";
+  }
+
   async function refreshEnvironment(){
-    // Open-Meteo: humidity + precipitation + wind
     const url =
       `https://api.open-meteo.com/v1/forecast?latitude=${ENV.lat}&longitude=${ENV.lon}` +
       `&current=wind_speed_10m,relative_humidity_2m,precipitation&wind_speed_unit=ms`;
@@ -128,99 +163,23 @@
       ENV.precip_mm = ENV.sim.precip_mm;
       ENV.live = false;
       ENV.lastUpdate = Date.now();
-      // console.warn("ENV fetch failed -> SIM input accepted:", e);
     }
     updateStamp();
   }
 
-  function updateStamp(){
-    const modeEl = document.getElementById("mode");
-    const dotEl  = document.getElementById("dot");
-    const ageEl  = document.getElementById("age");
-
-    modeEl.textContent = ENV.live ? "LIVE" : "SIM";
-    dotEl.style.background = ENV.live
-      ? "rgba(20,60,35,0.65)"    // 黒緑：生
-      : "rgba(70,55,18,0.60)";  // くすみ黄土：仮
-
-    const mins = Math.max(0, Math.floor((Date.now() - ENV.lastUpdate)/60000));
-    ageEl.textContent = ENV.lastUpdate ? `${mins}m` : "";
-  }
+  function envWindN(){ return clamp01(ENV.wind_ms / 14); }
+  function envHumN(){  return clamp01((ENV.humidity - 30) / 60); } // 30..90
+  function envPreN(){  return clamp01(ENV.precip_mm / 2.0); }     // 0..2mm/h
 
   // =========================================================
-  // 2) FIELD — "湿った壁の煤/手垢/雨跡"
-  //
-  // 重要：意味を作らないために
-  // - 因果を読ませない（規則性を強くしない）
-  // - ただし完全ランダムでもない（壁の物理に従う）
+  // 2) Noise (BigIntなし、確実に動く hash)
   // =========================================================
-
-  // 密度（煤/汚れ）と湿り（にじみやすさ）
-  const N = () => simW * simH;
-  let soot = new Float32Array(1);
-  let wet  = new Float32Array(1);
-  let scar = new Float32Array(1); // 削れ（下地が出る/擦れ跡）
-  let tmpSoot = new Float32Array(1);
-  let tmpWet  = new Float32Array(1);
-  let tmpScar = new Float32Array(1);
-
-  function allocFields(){
-    soot = new Float32Array(simW*simH);
-    wet  = new Float32Array(simW*simH);
-    scar = new Float32Array(simW*simH);
-    tmpSoot = new Float32Array(simW*simH);
-    tmpWet  = new Float32Array(simW*simH);
-    tmpScar = new Float32Array(simW*simH);
-  }
-  allocFields();
-
-  // “ずっとそこにあった”を作る：最初から途中経過（層ができている）
-  function seedAsAlreadyHere(){
-    const t = Date.now() * 0.001;
-    for(let y=0; y<simH; y++){
-      for(let x=0; x<simW; x++){
-        const i = y*simW + x;
-        // 下に行くほど溜まりやすい（重力）
-        const gy = y / (simH-1);
-
-        // ムラ：規則性が読めないレベルの“壁の癖”
-        const n1 = valueNoise2D(x*0.12, y*0.12, 19.3);
-        const n2 = valueNoise2D(x*0.03, y*0.05, 71.1);
-        const blob = clamp01(0.55*n1 + 0.45*n2);
-
-        // すでにある煤（薄い層）
-        soot[i] = clamp01( (0.08 + 0.32*gy) * (0.25 + 0.75*blob) );
-
-        // 湿り：壁の“冷えた部分”が残る
-        wet[i]  = clamp01( 0.18 + 0.22*blob + 0.10*(1-gy) );
-
-        // 擦れ（手垢の逆：削れて薄くなる）
-        const sc = valueNoise2D(x*0.06, y*0.06, 130.7);
-        scar[i] = clamp01( (sc>0.76 ? (sc-0.76)*2.2 : 0) * (0.15 + 0.65*(1-gy)) );
-      }
-    }
-  }
-
-  // リサイズでフィールドを再確保したら再シード
-  const _resize0 = resize;
-  resize = function(){
-    _resize0();
-    allocFields();
-    seedAsAlreadyHere();
-  };
-  seedAsAlreadyHere();
-
-  // ---------------------------------------------------------
-  // 2.1 Noise (軽量なvalue noise) — “意味のない壁の癖”
-  // ---------------------------------------------------------
   function hash2D(x,y,seed){
-    // 32-bit hash
-    let h = x*374761393 + y*668265263 + (seed*1442695040888963407n ? 0 : 0); // dummy to avoid JS bigint confusion
-    // JSではbigint混ぜない：整数で
-    h = (x*374761393) ^ (y*668265263) ^ (seed*144269);
-    h = (h ^ (h >> 13)) * 1274126177;
-    h = h ^ (h >> 16);
-    return (h >>> 0) / 4294967295;
+    // すべて number で完結
+    let h = (x|0) * 374761393 + (y|0) * 668265263 + (seed|0) * 144269;
+    h = (h ^ (h >>> 13)) * 1274126177;
+    h = (h ^ (h >>> 16)) >>> 0;
+    return h / 4294967295;
   }
   function smoothstep(t){ return t*t*(3-2*t); }
 
@@ -242,24 +201,51 @@
     return ab + (cd-ab)*v; // 0..1
   }
 
-  // ---------------------------------------------------------
-  // 2.2 Wet wall dynamics
-  // ---------------------------------------------------------
+  // =========================================================
+  // 3) Fields — soot / wet / scar
+  // =========================================================
+  let soot, wet, scar, tmpSoot, tmpWet, tmpScar;
+
+  function allocFields(){
+    const n = simW*simH;
+    soot = new Float32Array(n);
+    wet  = new Float32Array(n);
+    scar = new Float32Array(n);
+    tmpSoot = new Float32Array(n);
+    tmpWet  = new Float32Array(n);
+    tmpScar = new Float32Array(n);
+  }
+
+  function seedAsAlreadyHere(){
+    if(!soot) return;
+    for(let y=0; y<simH; y++){
+      for(let x=0; x<simW; x++){
+        const i = y*simW + x;
+        const gy = y / (simH-1);
+
+        const n1 = valueNoise2D(x*0.12, y*0.12, 19.3);
+        const n2 = valueNoise2D(x*0.03, y*0.05, 71.1);
+        const blob = clamp01(0.55*n1 + 0.45*n2);
+
+        soot[i] = clamp01( (0.08 + 0.32*gy) * (0.25 + 0.75*blob) );
+        wet[i]  = clamp01( 0.18 + 0.22*blob + 0.10*(1-gy) );
+
+        const sc = valueNoise2D(x*0.06, y*0.06, 130.7);
+        scar[i] = clamp01( (sc>0.76 ? (sc-0.76)*2.2 : 0) * (0.15 + 0.65*(1-gy)) );
+      }
+    }
+  }
+
+  // =========================================================
+  // 4) Dynamics
+  // =========================================================
   const STATE = {
-    // 壁の“湿りの全体量”（環境からゆっくり追従）
     wetGlobal: 0.28,
-    sootIn: 0.020,   // 新たに付着する煤（微量）
-    smearRate: 0.0004, // たまに起きる手垢（局所的な濃淡）
-    erosionRate: 0.00018, // 削れ（薄くなる）
-    // “不可逆だが確信できない”速度のための係数
-    timeScale: 1.0,
+    sootIn: 0.020,
+    smearRate: 0.00035,
+    erosionRate: 0.00018,
   };
 
-  function envWindN(){ return clamp01(ENV.wind_ms / 14); }
-  function envHumN(){  return clamp01((ENV.humidity - 30) / 60); } // 30..90
-  function envPreN(){  return clamp01(ENV.precip_mm / 2.0); }     // 0..2mm/h程度を1に
-
-  // 壁の湿り：湿度+降水に追従。ただし暴れない。
   function updateGlobalWet(){
     const target = clamp01(0.10 + 0.55*envHumN() + 0.35*envPreN());
     STATE.wetGlobal = lerp(STATE.wetGlobal, target, 0.006);
@@ -268,43 +254,29 @@
   function stepField(time){
     updateGlobalWet();
 
-    const wn = envWindN();
+    const wn  = envWindN();
     const hum = envHumN();
     const pre = envPreN();
 
-    // 重力（雨筋）: 湿っているほど流れる
     const gravity = 0.06 + 0.22*STATE.wetGlobal + 0.12*pre;
-
-    // 横流れ：風でわずかに偏る（ただし読めない程度）
     const drift = (wn - 0.5) * (0.04 + 0.06*STATE.wetGlobal);
-
-    // にじみ：湿りで広がる
     const spread = 0.010 + 0.040*STATE.wetGlobal;
-
-    // 乾き：湿りが少ないほど煤が固定化して動かなくなる（＝古びる）
     const dryFix = 0.0018 + (1-STATE.wetGlobal)*0.0040;
 
-    // 削れ：局所的に薄くなる（手が触れた/風雨で落ちたような）
     const erosion = STATE.erosionRate * (0.35 + 0.65*wn) * (0.55 + 0.45*(1-pre));
-
-    // たまに起きる“手垢”：説明できないが生々しい
     const smearChance = STATE.smearRate * (0.6 + 0.8*hum);
 
-    // まず tmp をクリア
     tmpSoot.fill(0);
     tmpWet.fill(0);
     tmpScar.fill(0);
 
-    // 近傍参照（簡易拡散+流下）
     for(let y=0; y<simH; y++){
       for(let x=0; x<simW; x++){
         const i = y*simW + x;
 
-        // 局所湿り：全体湿り + 壁の癖
         const wallGrain = valueNoise2D(x*0.06, y*0.06, 250.2);
         const localWet = clamp01( 0.55*STATE.wetGlobal + 0.30*wallGrain + 0.15*wet[i] );
 
-        // 移動方向：下 + 微風 + 壁の癖（意味が読めない）
         const jitter = (valueNoise2D(x*0.10 + time*0.15, y*0.10, 88.8)-0.5) * 0.08;
         const dx = drift + jitter;
         const dy = gravity * (0.35 + 0.75*localWet);
@@ -312,7 +284,6 @@
         const sx = x - dx;
         const sy = y - dy;
 
-        // サンプル座標（バイリニア簡易）
         const x0 = Math.max(0, Math.min(simW-1, Math.floor(sx)));
         const y0 = Math.max(0, Math.min(simH-1, Math.floor(sy)));
         const x1 = Math.max(0, Math.min(simW-1, x0+1));
@@ -340,27 +311,20 @@
         let wv = w0 + (w1-w0)*fy;
         let sc = c0 + (c1-c0)*fy;
 
-        // にじみ（湿っているほどぼやける）
-        // ただし「美しく拡散」しない：壁の癖でムラ
         const nb = valueNoise2D(x*0.08, y*0.08, 401.7);
         const blur = spread * (0.35 + 0.65*localWet) * (0.50 + 0.50*nb);
 
-        // 近傍平均との差に寄せる（簡易拡散）
         const xl = x>0 ? i-1 : i, xr = x<simW-1 ? i+1 : i;
         const yu = y>0 ? i-simW : i, yd = y<simH-1 ? i+simW : i;
         const neigh = (soot[xl] + soot[xr] + soot[yu] + soot[yd]) * 0.25;
         s = lerp(s, neigh, blur);
 
-        // 乾くほど固定化（動かなくなる＝古びる）
         s = lerp(s, soot[i], dryFix*(1-localWet));
 
-        // 削れ（擦れ/雨の落ち）
-        // scarがある場所ほど煤が乗りにくくなる
         const er = erosion * (0.25 + 0.75*(1-localWet));
         sc = clamp01(sc + er * (0.35 + 0.65*valueNoise2D(x*0.12, y*0.12, 990.3)));
         s = clamp01(s * (1 - sc*0.12));
 
-        // 湿りの“記憶”：濡れた箇所が少し残る
         wv = lerp(wv, localWet, 0.020);
         wv = clamp01(wv * (0.998 + 0.002*hum));
 
@@ -370,34 +334,23 @@
       }
     }
 
-    // 新規付着（煤/雨だれの核）
-    // 上から薄く落ちてくる + たまに局所的に濃い“手の跡”
     const sootIn = STATE.sootIn * (0.25 + 0.75*(0.45*hum + 0.55*(1-pre)));
     for(let y=0; y<simH; y++){
       for(let x=0; x<simW; x++){
         const i = y*simW + x;
-
-        // 上ほど付着しやすいが、雨筋で下へ運ばれる
         const gy = y / (simH-1);
         const topBias = (1-gy);
         const grain = valueNoise2D(x*0.18 + time*0.05, y*0.10, 33.1);
-
-        // 雨筋の核：縦に伸びる“始まり”を作らないよう、薄い
         const streakSeed = valueNoise2D(x*0.05, 0.0, 777.2);
         const streak = (streakSeed > 0.86) ? (streakSeed - 0.86) * 0.9 : 0.0;
 
-        // 新規煤は “ほんの少し” だけ
         const add = sootIn * (0.20 + 0.80*grain) * (0.08 + 0.92*topBias) + streak*0.0012;
-
         tmpSoot[i] = clamp01(tmpSoot[i] + add * (0.35 + 0.65*(1-tmpScar[i])));
 
-        // 手垢（局所イベント）：説明できないが「生きてる」
-        // ただし反応ではなく、壁が勝手に持つ記憶として稀に発生
         if(Math.random() < smearChance){
           const cx = (Math.random()*simW)|0;
           const cy = (Math.random()*simH)|0;
           const r = 6 + Math.random()*18;
-          // 触れやすい高さ帯（ざっくり中段〜下寄り）
           if(cy > simH*0.25 && cy < simH*0.85){
             for(let yy=-r; yy<=r; yy++){
               for(let xx=-r; xx<=r; xx++){
@@ -407,7 +360,6 @@
                 if(d2 > r*r) continue;
                 const j = ny*simW + nx;
                 const fall = 1 - Math.sqrt(d2)/(r+1e-6);
-                // 濃くも薄くもなる：確定しない
                 const sign = (Math.random()<0.55) ? 1 : -1;
                 tmpSoot[j] = clamp01(tmpSoot[j] + sign * fall * 0.010 * (0.6 + 0.4*Math.random()));
                 tmpScar[j] = clamp01(tmpScar[j] + (Math.random()*0.006) * fall);
@@ -418,40 +370,28 @@
       }
     }
 
-    // 交換
     soot.set(tmpSoot);
     wet.set(tmpWet);
     scar.set(tmpScar);
   }
 
   // =========================================================
-  // 3) RENDER — 壁の表面（紙ではなく“壁塗装”）
-  //
-  // 規則性が読めると意味が収束するので：
-  // - 彩度を上げない
-  // - コントラストを上げない
-  // - 端で自然に消す（フレーム感を消す）
+  // 5) Render (低コントラスト・発光なし・端で消す)
   // =========================================================
   const PALETTE = {
-    // 壁の下地（少し暖かい灰）：明るすぎると“作品”になるので抑える
     baseR: 226, baseG: 218, baseB: 205,
-    // 煤（黒ではなく茶寄りの黒）＝湿った汚れ
     sootR: 38,  sootG: 32,  sootB: 28,
-    // 雨筋の冷え（少し青み）を“極小”だけ
     coldR: 130, coldG: 138, coldB: 142,
   };
 
   function vignette(xn, yn){
-    // 端を自然に薄くする（四角いフレームを消す）
     const dx = Math.abs(xn-0.5) / 0.5;
     const dy = Math.abs(yn-0.5) / 0.5;
     const d = Math.sqrt(dx*dx + dy*dy);
-    // 0..1 で端ほど強く
     return clamp01(1 - (d-0.15) / 0.95);
   }
 
   function render(){
-    // 画素に壁の質を焼く
     for(let y=0; y<simH; y++){
       for(let x=0; x<simW; x++){
         const i = y*simW + x;
@@ -463,95 +403,72 @@
 
         const xn = x/(simW-1);
         const yn = y/(simH-1);
-
-        // 端で消える（貼り付け感の排除）
         const v = vignette(xn, yn);
 
-        // 湿りがあると“暗さ”が少しだけ増す（煤が締まる）
         const dampDark = 0.88 + 0.22*wv;
-
-        // scar（削れ）は煤を薄くし、下地を出す
         const sEff = clamp01(s * (1 - sc*0.22));
-
-        // 低コントラストに押さえる（美しくしない）
         const k = clamp01(sEff * dampDark) * 0.72;
-
-        // 冷えの気配（雨跡）：極小
         const cold = (wv*wv) * 0.10;
 
-        // 壁下地の微粒（ノイズ）：均一を避ける
         const g1 = valueNoise2D(x*0.22, y*0.22, 501.9);
         const g2 = valueNoise2D(x*0.06, y*0.06, 911.3);
         const grain = (g1*0.6 + g2*0.4);
-        const baseJit = (grain - 0.5) * 10; // ±5程度
+        const baseJit = (grain - 0.5) * 10;
 
-        // 色合成：発光なし、ただ“付着”として暗くする
         let r = (PALETTE.baseR + baseJit);
         let g = (PALETTE.baseG + baseJit);
         let b = (PALETTE.baseB + baseJit);
 
-        // 煤で暗く
         r = lerp(r, PALETTE.sootR, k);
         g = lerp(g, PALETTE.sootG, k);
         b = lerp(b, PALETTE.sootB, k);
 
-        // 冷え（雨筋）をほんの少しだけ混ぜる
         r = lerp(r, PALETTE.coldR, cold);
         g = lerp(g, PALETTE.coldG, cold);
         b = lerp(b, PALETTE.coldB, cold);
 
-        // 端で“無かったことにする”
         r = lerp(PALETTE.baseR, r, v);
         g = lerp(PALETTE.baseG, g, v);
         b = lerp(PALETTE.baseB, b, v);
 
-        // clamp + write
         pix[p+0] = Math.max(0, Math.min(255, r|0));
         pix[p+1] = Math.max(0, Math.min(255, g|0));
         pix[p+2] = Math.max(0, Math.min(255, b|0));
         pix[p+3] = 255;
       }
     }
-
     sctx.putImageData(img, 0, 0);
 
-    // 表示：拡大（壁の“面”として）
     ctx.imageSmoothingEnabled = true;
     ctx.clearRect(0,0,canvas.width,canvas.height);
     ctx.drawImage(simCanvas, 0, 0, canvas.width, canvas.height);
   }
 
   // =========================================================
-  // 4) LOOP — ほぼ気づけない速度で、不可逆な“風化”
+  // 6) Loop
   // =========================================================
   let last = performance.now();
   function loop(now){
     requestAnimationFrame(loop);
-    const dt = Math.min(0.05, (now - last) / 1000);
+    const dt = Math.min(0.05, (now - last)/1000);
     last = now;
 
-    // 速度は固定しない：環境と端末負荷で微調整（読めない時間）
     const time = now * 0.001;
-
-    // 1フレームで大きく変わると“作品”になるので、内部ステップを控えめに
-    // dtに応じて 0〜2回だけ回す
     const steps = dt > 0.030 ? 2 : (dt > 0.016 ? 1 : 0);
-    for(let k=0; k<steps; k++){
-      stepField(time);
-    }
+    for(let k=0;k<steps;k++) stepField(time);
 
     render();
   }
 
   // =========================================================
-  // 5) BOOT
+  // 7) Boot
   // =========================================================
   (async function boot(){
+    updateStamp();
     await refreshEnvironment();
     setInterval(refreshEnvironment, ENV.interval_ms);
     loop(performance.now());
   })();
-
 })();
 </script>
 </body>
