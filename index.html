@@ -3,24 +3,76 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1.0" />
-  <title>MORIOKA FIELD — NANBU (SOLIDIFY)</title>
+  <title>MORIOKA FIELD — NANBU (SOLIDIFY) / ART MODE</title>
 
   <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
   <script src="https://unpkg.com/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
 
   <style>
-    body { margin:0; overflow:hidden; background:#000205; font-family: ui-monospace, Menlo, Monaco, "Courier New", monospace; }
+    body{
+      margin:0; overflow:hidden;
+      background:#020406;
+      font-family: ui-monospace, Menlo, Monaco, "Courier New", monospace;
+    }
+
     #hint{
       position:fixed; left:14px; bottom:14px;
-      color:rgba(0,242,255,0.35);
+      color:rgba(220,255,255,0.28);
       font-size:10px; letter-spacing:1px;
       user-select:none; pointer-events:none;
       mix-blend-mode:screen;
     }
-    #hint b{ color:rgba(0,242,255,0.55); font-weight:600; }
+    #hint b{ color:rgba(220,255,255,0.45); font-weight:600; }
+
+    /* ===== LIVE/SIM badge ===== */
+    #badge{
+      position:fixed; left:14px; top:14px;
+      padding:10px 12px;
+      border-radius:14px;
+      background:rgba(10,18,22,0.35);
+      border:1px solid rgba(200,255,255,0.12);
+      color:rgba(220,255,255,0.85);
+      font-size:12px;
+      letter-spacing:0.6px;
+      display:flex; gap:10px; align-items:center;
+      user-select:none; pointer-events:none;
+      backdrop-filter: blur(6px);
+      mix-blend-mode:screen;
+    }
+    #badge-dot{
+      width:10px; height:10px; border-radius:50%;
+      background:rgba(255,255,255,0.25);
+      box-shadow: 0 0 18px rgba(255,255,255,0.18);
+      flex: 0 0 auto;
+    }
+    #badge-text{ white-space:nowrap; }
+    #badge-meta{
+      opacity:0.65;
+      font-size:11px;
+      white-space:nowrap;
+    }
+    .badge-live #badge-dot{
+      background:rgba(190,255,230,0.95);
+      box-shadow: 0 0 24px rgba(190,255,230,0.55);
+    }
+    .badge-sim #badge-dot{
+      background:rgba(255,210,160,0.92);
+      box-shadow: 0 0 22px rgba(255,210,160,0.55);
+      animation: pulse 1.2s ease-in-out infinite;
+    }
+    @keyframes pulse{
+      0%,100%{ transform:scale(1); opacity:0.85; }
+      50%{ transform:scale(1.35); opacity:1; }
+    }
   </style>
 </head>
+
 <body>
+  <div id="badge">
+    <span id="badge-dot"></span>
+    <span id="badge-text">CONNECTING</span>
+    <span id="badge-meta"></span>
+  </div>
   <div id="hint">DRAG <b>ROTATE</b> / SCROLL <b>ZOOM</b> / TAP <b>ONCE</b> (SOUND)</div>
 
 <script>
@@ -107,6 +159,7 @@
    * =========================================================
    */
   const scene = new THREE.Scene();
+  scene.fog = new THREE.FogExp2(0x03060a, 0.06);
 
   const camera = new THREE.PerspectiveCamera(75, window.innerWidth/window.innerHeight, 0.1, 1000);
   camera.position.set(0, -6, 10);
@@ -114,6 +167,7 @@
   const renderer = new THREE.WebGLRenderer({ antialias:true });
   renderer.setSize(window.innerWidth, window.innerHeight);
   renderer.setPixelRatio(Math.min(window.devicePixelRatio||1, 2));
+  renderer.setClearColor(0x020406, 1);
   document.body.appendChild(renderer.domElement);
 
   const controls = new THREE.OrbitControls(camera, renderer.domElement);
@@ -131,9 +185,24 @@
   scene.add(light);
   scene.add(new THREE.AmbientLight(0x202020));
 
-  const grid = new THREE.GridHelper(22, 22, 0x003a55, 0x001022);
-  grid.rotateX(Math.PI/2);
-  scene.add(grid);
+  // ---- soft sprite (natural grain) ----
+  function makeSoftSpriteTexture(){
+    const c = document.createElement("canvas");
+    c.width = c.height = 128;
+    const g = c.getContext("2d");
+    const grad = g.createRadialGradient(64,64,0, 64,64,64);
+    grad.addColorStop(0.00, "rgba(255,255,255,1.0)");
+    grad.addColorStop(0.25, "rgba(255,255,255,0.35)");
+    grad.addColorStop(0.55, "rgba(255,255,255,0.12)");
+    grad.addColorStop(1.00, "rgba(255,255,255,0.00)");
+    g.fillStyle = grad;
+    g.fillRect(0,0,128,128);
+    const tex = new THREE.CanvasTexture(c);
+    tex.minFilter = THREE.LinearFilter;
+    tex.magFilter = THREE.LinearFilter;
+    return tex;
+  }
+  const softSprite = makeSoftSpriteTexture();
 
   /**
    * =========================================================
@@ -179,12 +248,12 @@
 
   /**
    * =========================================================
-   * 5) TRACE — particles + irreversible trace
+   * 5) TRACE — particles + irreversible trace (ART MODE)
    * =========================================================
    */
   const TRACE = {
     particleCount: 2600,
-    particleSize: 0.028,
+    particleSize: 0.085,
     trailMax: 5200,
     trailDissolveBase: 0.99935, // 染み込み（基準）
     x:0, y:0, z:0,
@@ -203,6 +272,7 @@
   TRACE.y = (seededRand()-0.5)*0.2;
   TRACE.z = (seededRand()-0.5)*0.2;
 
+  // Particles (grain)
   const pGeo = new THREE.BufferGeometry();
   const pPos = new Float32Array(TRACE.particleCount * 3);
   for(let i=0;i<TRACE.particleCount;i++){
@@ -214,15 +284,32 @@
   pGeo.setAttribute("position", new THREE.BufferAttribute(pPos, 3));
   const particles = new THREE.Points(
     pGeo,
-    new THREE.PointsMaterial({ color:0x00f2ff, size:TRACE.particleSize, transparent:true, opacity:0.48 })
+    new THREE.PointsMaterial({
+      color:0x9ffcff,
+      size:TRACE.particleSize,
+      map:softSprite,
+      transparent:true,
+      opacity:0.18,
+      blending:THREE.AdditiveBlending,
+      depthWrite:false
+    })
   );
   scene.add(particles);
 
+  // Trace as Points (not Line)
   const trail = new Float32Array(TRACE.trailMax * 3);
   const trailGeo = new THREE.BufferGeometry();
   trailGeo.setAttribute("position", new THREE.BufferAttribute(trail, 3));
-  const trailMat = new THREE.LineBasicMaterial({ color:0x00f2ff, transparent:true, opacity:0.75 });
-  const attractor = new THREE.Line(trailGeo, trailMat);
+  const trailMat = new THREE.PointsMaterial({
+    color:0xb9ffff,
+    size:0.045,
+    map:softSprite,
+    transparent:true,
+    opacity:0.22,
+    blending:THREE.AdditiveBlending,
+    depthWrite:false
+  });
+  const attractor = new THREE.Points(trailGeo, trailMat);
   scene.add(attractor);
 
   /**
@@ -305,25 +392,58 @@
    */
   const SOLID = {
     value: 0.0,               // 0..1
-    // 固化速度（ゆっくり：展示でも“生きてる”けど、確実に矢印がある）
     rate: 0.00006,            // 基本固化
-    // 風化（風が強いとわずかに削る＝完全固定しない）
     weather: 0.00003,         // 風化係数
   };
 
   function updateSolidify(wn){
-    // 固化（1に近づく）：不可逆の矢印
     const grow = (1 - SOLID.value) * SOLID.rate;
-
-    // 風化：風が強いほど、固まったものがほんの少しだけ削られる（戻すではない）
     const erode = SOLID.value * (SOLID.weather * wn);
-
     SOLID.value = clamp01(SOLID.value + grow - erode);
   }
 
   /**
    * =========================================================
-   * 9) Main loop
+   * 9) LIVE vs SIM micro-difference (1% behavior cue)
+   * ---------------------------------------------------------
+   * LIVE: slightly steadier (less jitter / calmer dissolve)
+   * SIM : slightly more breathing (tiny extra wobble)
+   * =========================================================
+   */
+  function liveSimFactor(){
+    // 0.0 (SIM) -> 1.0 (LIVE)
+    return ENV.live ? 1.0 : 0.0;
+  }
+
+  /**
+   * =========================================================
+   * 10) UI badge update
+   * =========================================================
+   */
+  function updateBadge(){
+    const badge = document.getElementById("badge");
+    const btext = document.getElementById("badge-text");
+    const bmeta = document.getElementById("badge-meta");
+    if(!badge || !btext || !bmeta) return;
+
+    const ageSec = Math.max(0, Math.round((Date.now() - ENV.lastUpdate)/1000));
+
+    if(ENV.live){
+      badge.classList.add("badge-live");
+      badge.classList.remove("badge-sim");
+      btext.textContent = "LIVE INPUT";
+    }else{
+      badge.classList.add("badge-sim");
+      badge.classList.remove("badge-live");
+      btext.textContent = "SIM INPUT";
+    }
+
+    bmeta.textContent = `wind ${ENV.wind_ms.toFixed(1)} m/s · temp ${ENV.temp_c.toFixed(1)} °C · age ${ageSec}s`;
+  }
+
+  /**
+   * =========================================================
+   * 11) Main loop
    * =========================================================
    */
   function animate(){
@@ -347,6 +467,11 @@
     updateSolidify(wn);
     const solidN = SOLID.value;
 
+    // LIVE/SIM subtle cue: SIM breathes a little more, LIVE steadies a little
+    const live = liveSimFactor();            // 1.0 live, 0.0 sim
+    const simBreath = (1.0 - live);          // 1.0 sim, 0.0 live
+    const cueWobble = 1.0 + simBreath * 0.06; // SIM +6% wobble (subtle)
+
     // === Particles advected by Field ===
     const pos = particles.geometry.attributes.position.array;
 
@@ -357,7 +482,8 @@
     const fieldStrength =
       (FIELD.strengthBase + FIELD.strengthWind * wn)
       * (0.55 + 0.9 * chaosN)
-      * (0.35 + 0.65 * mobility); // 固化が進むほど下がる
+      * (0.35 + 0.65 * mobility)
+      * cueWobble;
 
     for(let i=0;i<TRACE.particleCount;i++){
       const b=i*3;
@@ -384,7 +510,10 @@
 
     // === Irreversible trace (dissolve into field) ===
     // 固化が進むほど、痕跡が“染み込みやすい”（= 消えにくい）
-    const dissolve = TRACE.trailDissolveBase + solidN * 0.00025; // 1に近づく
+    // LIVEは少し安定（消え方がほんの少し落ち着く）、SIMは少し呼吸する
+    const dissolveBase = TRACE.trailDissolveBase + solidN * 0.00025;
+    const dissolve = dissolveBase + (live * 0.000015) - (simBreath * 0.000015);
+
     for(let i=0;i<trail.length;i++) trail[i] *= dissolve;
 
     // Lorenz-like breath: wind -> agitation, iron -> folding, observer -> calm, solid -> stabilization
@@ -399,7 +528,7 @@
     const dz = TRACE.x * TRACE.y - beta * TRACE.z;
 
     // “砂”の微小歪み：固化で時間変動は減る（固定化）
-    const micro = (ironN * 0.006) * chaosN * (0.30 + 0.70*mobility);
+    const micro = (ironN * 0.006) * chaosN * (0.30 + 0.70*mobility) * cueWobble;
 
     TRACE.x += dx * dt + (Math.sin(time * 0.9 + TRACE.x * 3.0) * micro);
     TRACE.y += dy * dt + (Math.sin(time * 0.7 + TRACE.y * 2.2) * micro);
@@ -415,12 +544,12 @@
     trailGeo.attributes.position.needsUpdate = true;
 
     // 近いほど囁き／固化が進むほど“薄いのに残る”方向へ
-    attractor.material.opacity = (0.14 + 0.64*chaosN) * (0.85 - 0.25*solidN);
+    attractor.material.opacity = (0.10 + 0.46*chaosN) * (0.85 - 0.25*solidN);
 
     // === Sound ===
     if(SOUND.started){
       // 固化が進むほど揺れが減り、音が“安定”する
-      const wobble = (0.22 + wn*0.85) * chaosN * (1 - solidN*0.65);
+      const wobble = (0.22 + wn*0.85) * chaosN * (1 - solidN*0.65) * cueWobble;
       const ironTone = 0.6 + ironN*0.8;
 
       SOUND.osc1.frequency.value = 48 * ironTone + Math.sin(time * 0.9) * (2.2 * wobble);
@@ -432,6 +561,9 @@
       // close => whisper
       SOUND.master.gain.value = 0.04 + SOUND.maxGain * (0.75 * chaosN);
     }
+
+    // UI
+    updateBadge();
 
     controls.update();
     renderer.render(scene, camera);
