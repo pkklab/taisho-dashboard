@@ -3,343 +3,446 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1.0" />
-  <title>TAISHO LIVE-DATA DASHBOARD</title>
+  <title>MORIOKA FIELD — NANBU (SOLIDIFY)</title>
 
-  <!-- three.js (non-module) -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
   <script src="https://unpkg.com/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
 
   <style>
-    body { margin:0; background:#000205; overflow:hidden; font-family:'Courier New', monospace; }
-    #ui { position:absolute; top:20px; left:20px; color:#00f2ff; pointer-events:none; z-index:10; }
-    .label { font-size:10px; letter-spacing:3px; color:#0088aa; }
-    .value { font-size:24px; font-weight:bold; text-shadow:0 0 15px #00f2ff; margin-bottom:6px; }
-    #status { font-size:11px; background:rgba(0,242,255,0.08); padding:8px 10px; color:#00f2ff; display:inline-block; line-height:1.6; }
-    #guide { position:absolute; bottom:18px; right:18px; color:#00f2ff; font-size:10px; opacity:0.5; }
-    #tiny { font-size:10px; color:#00a9b8; letter-spacing:1px; }
+    body { margin:0; overflow:hidden; background:#000205; font-family: ui-monospace, Menlo, Monaco, "Courier New", monospace; }
+    #hint{
+      position:fixed; left:14px; bottom:14px;
+      color:rgba(0,242,255,0.35);
+      font-size:10px; letter-spacing:1px;
+      user-select:none; pointer-events:none;
+      mix-blend-mode:screen;
+    }
+    #hint b{ color:rgba(0,242,255,0.55); font-weight:600; }
   </style>
 </head>
-
 <body>
-  <div id="ui">
-    <div class="label">OSAKA PORT REAL-TIME</div>
-    <div id="tide-display" class="value">INITIALIZING...</div>
-
-    <div class="label">TAISHO WIND SPEED</div>
-    <div id="wind-display" class="value">WAITING...</div>
-
-    <div id="status">
-      STATUS: BOOTING...
-      <div id="tiny">LAST UPDATE: --:-- / MODE: SIM</div>
-    </div>
-  </div>
-  <div id="guide">DRAG: ROTATE / SCROLL: ZOOM</div>
+  <div id="hint">DRAG <b>ROTATE</b> / SCROLL <b>ZOOM</b> / TAP <b>ONCE</b> (SOUND)</div>
 
 <script>
 (() => {
-  // =========================
-  // Config
-  // =========================
-  const LAT = 34.65;
-  const LON = 135.43;
+  // ========== utils ==========
+  function clamp01(x){ return Math.min(Math.max(x,0),1); }
+  function lerp(a,b,t){ return a + (b-a)*t; }
 
-  const FETCH_INTERVAL_MS = 10 * 60 * 1000; // 10分
-  const FETCH_TIMEOUT_MS  = 8000;           // 通信タイムアウト
-  const WIND_UNIT = "ms";
+  async function fetchJsonWithTimeout(url, timeoutMs){
+    const ctrl = new AbortController();
+    const t = setTimeout(()=>ctrl.abort(), timeoutMs);
+    try{
+      const res = await fetch(url, { signal: ctrl.signal, cache:"no-store" });
+      if(!res.ok) throw new Error(`HTTP ${res.status}`);
+      return await res.json();
+    } finally { clearTimeout(t); }
+  }
 
-  // 演出の係数
-  const CORE_SCALE_BASE = 0.55;
-  const CORE_SCALE_TIDE_DIV = 260; // 潮位cmで割る
-  const PARTICLE_BASE_SPEED = 0.05;
-  const PARTICLE_WIND_SPEED_FACTOR = 0.02;
-
-  // 潮位のスムージング（LIVE値へ追従する速度）
-  // 0.03〜0.10あたりで好みに調整OK（大きいほど追従が速い）
-  const TIDE_FOLLOW = 0.06;
-
-  // =========================
-  // State
-  // =========================
-  let liveWindMs = 3.0;       // m/s
-  let isTideLive = false;
-  let isWindLive = false;
-  let lastUpdateStr = "--:--";
-
-  // Tide: APIで得た「目標値」と、画面に出す「追従値」
-  let targetTideCm  = 120;
-  let displayTideCm = 120;
-
-  // fallback波（通信失敗時のシミュレーション）
-  const sim = {
-    tideBase: 120,
-    tideAmp: 80,
-    tideFreq: 0.5
+  /**
+   * =========================================================
+   * 1) INPUT — Environment (uncontrollable)
+   * =========================================================
+   */
+  const ENV = {
+    lat: 39.7036, lon: 141.1527,
+    wind_ms: 2.5, temp_c: 10.0,
+    live: false, lastUpdate: 0,
+    sim: { wind_ms: 2.6, temp_c: 9.0 },
+    interval_ms: 10 * 60 * 1000,
+    timeout_ms: 8000,
   };
 
-  // =========================
-  // UI helpers
-  // =========================
-  const $tide   = document.getElementById("tide-display");
-  const $wind   = document.getElementById("wind-display");
-  const $status = document.getElementById("status");
-  const $tiny   = document.getElementById("tiny");
+  function windN(){ return clamp01(ENV.wind_ms / 14); }
+  function tempN(){ return clamp01((ENV.temp_c + 5) / 30); } // -5..25 -> 0..1（季節演出ではなく材の張り）
 
-  function setStatus(line1, modeText) {
-    $status.firstChild.nodeValue = line1;
-    $tiny.textContent = `LAST UPDATE: ${lastUpdateStr} / MODE: ${modeText}`;
+  async function refreshEnvironment(){
+    const url =
+      `https://api.open-meteo.com/v1/forecast?latitude=${ENV.lat}&longitude=${ENV.lon}` +
+      `&current=wind_speed_10m,temperature_2m&wind_speed_unit=ms`;
+
+    try{
+      const data = await fetchJsonWithTimeout(url, ENV.timeout_ms);
+      const w = Number(data?.current?.wind_speed_10m);
+      const t = Number(data?.current?.temperature_2m);
+
+      const okW = Number.isFinite(w);
+      const okT = Number.isFinite(t);
+
+      ENV.wind_ms = okW ? w : ENV.sim.wind_ms;
+      ENV.temp_c  = okT ? t : ENV.sim.temp_c;
+      ENV.live = okW && okT;
+      ENV.lastUpdate = Date.now();
+    } catch(e){
+      // 取れないことも「入力として受け入れる」
+      ENV.wind_ms = ENV.sim.wind_ms;
+      ENV.temp_c  = ENV.sim.temp_c;
+      ENV.live = false;
+      ENV.lastUpdate = Date.now();
+      console.warn("ENV fetch failed -> SIM input accepted:", e);
+    }
   }
 
-  function nowHHMM() {
-    const d = new Date();
-    const hh = String(d.getHours()).padStart(2, "0");
-    const mm = String(d.getMinutes()).padStart(2, "0");
-    return `${hh}:${mm}`;
+  /**
+   * =========================================================
+   * 2) OBSERVER — presence (not control)
+   * =========================================================
+   */
+  const OBS = { pointer:{x:0.5,y:0.5}, proximity:0.0 };
+  window.addEventListener("pointermove", (e)=>{
+    OBS.pointer.x = e.clientX / window.innerWidth;
+    OBS.pointer.y = e.clientY / window.innerHeight;
+  }, { passive:true });
+
+  function proximityToCenter(){
+    const dx = OBS.pointer.x - 0.5;
+    const dy = OBS.pointer.y - 0.5;
+    const d = Math.sqrt(dx*dx + dy*dy);
+    return 1.0 - Math.min(d / 0.62, 1.0); // 0..1
   }
 
-  // =========================
-  // three.js setup
-  // =========================
+  /**
+   * =========================================================
+   * 3) WORLD — renderer + camera
+   * =========================================================
+   */
   const scene = new THREE.Scene();
 
-  const camera = new THREE.PerspectiveCamera(
-    75,
-    window.innerWidth / window.innerHeight,
-    0.1,
-    1000
-  );
+  const camera = new THREE.PerspectiveCamera(75, window.innerWidth/window.innerHeight, 0.1, 1000);
   camera.position.set(0, -6, 10);
 
-  const renderer = new THREE.WebGLRenderer({ antialias: true });
+  const renderer = new THREE.WebGLRenderer({ antialias:true });
   renderer.setSize(window.innerWidth, window.innerHeight);
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio||1, 2));
   document.body.appendChild(renderer.domElement);
 
   const controls = new THREE.OrbitControls(camera, renderer.domElement);
   controls.enableDamping = true;
   controls.dampingFactor = 0.06;
 
-  // Grid
-  const grid = new THREE.GridHelper(20, 20, 0x004466, 0x001122);
-  grid.rotateX(Math.PI / 2);
-  scene.add(grid);
-
-  // Outline
-  const points = [
-    new THREE.Vector3(0, 3, 0),
-    new THREE.Vector3(-2, 1, 0),
-    new THREE.Vector3(-2.5, -2, 0),
-    new THREE.Vector3(0, -3.5, 0),
-    new THREE.Vector3(2.5, -2, 0),
-    new THREE.Vector3(2, 1, 0),
-    new THREE.Vector3(0, 3, 0),
-  ];
-  const outline = new THREE.Line(
-    new THREE.BufferGeometry().setFromPoints(points),
-    new THREE.LineBasicMaterial({ color: 0x0088ff })
-  );
-  scene.add(outline);
-
-  // Landmarks
-  [
-    { p: [0, 3, 0],     c: 0xffffff },
-    { p: [0.5, 1.5, 0], c: 0xffffff },
-    { p: [0, -0.5, 0],  c: 0x00ff88 },
-  ].forEach(l => {
-    const m = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.02, 0.05, 10, 8),
-      new THREE.MeshBasicMaterial({ color: l.c, transparent: true, opacity: 0.3 })
-    );
-    m.position.set(l.p[0], l.p[1], 0);
-    m.rotation.x = Math.PI / 2;
-    scene.add(m);
-  });
-
-  // Particles (Wind)
-  const pCount = 2000;
-  const pGeo = new THREE.BufferGeometry();
-  const pPos = new Float32Array(pCount * 3);
-  for (let i = 0; i < pCount; i++) {
-    const base = i * 3;
-    pPos[base + 0] = (Math.random() - 0.5) * 20;
-    pPos[base + 1] = (Math.random() - 0.5) * 20;
-    pPos[base + 2] = (Math.random() - 0.5) * 20;
-  }
-  pGeo.setAttribute("position", new THREE.BufferAttribute(pPos, 3));
-  const particles = new THREE.Points(
-    pGeo,
-    new THREE.PointsMaterial({ color: 0x00f2ff, size: 0.03, transparent: true, opacity: 0.5 })
-  );
-  scene.add(particles);
-
-  // Core
-  const core = new THREE.Mesh(
-    new THREE.OctahedronGeometry(1, 0),
-    new THREE.MeshPhongMaterial({ color: 0x00f2ff, wireframe: true })
-  );
-  scene.add(core);
-
-  // Lights (安定版)
-  const light = new THREE.PointLight(0xffffff, 1, 100);
-  light.position.set(5, 5, 5);
-  scene.add(light);
-  scene.add(new THREE.AmbientLight(0x222222));
-
-  // Resize
-  window.addEventListener("resize", () => {
-    camera.aspect = window.innerWidth / window.innerHeight;
+  window.addEventListener("resize", ()=>{
+    camera.aspect = window.innerWidth/window.innerHeight;
     camera.updateProjectionMatrix();
     renderer.setSize(window.innerWidth, window.innerHeight);
   });
 
-  // =========================
-  // fetch helpers (timeout付き)
-  // =========================
-  async function fetchJsonWithTimeout(url, timeoutMs) {
-    const ctrl = new AbortController();
-    const t = setTimeout(() => ctrl.abort(), timeoutMs);
-    try {
-      const res = await fetch(url, { signal: ctrl.signal, cache: "no-store" });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      return await res.json();
-    } finally {
-      clearTimeout(t);
-    }
+  const light = new THREE.PointLight(0xffffff, 0.95, 140);
+  light.position.set(6, 6, 8);
+  scene.add(light);
+  scene.add(new THREE.AmbientLight(0x202020));
+
+  const grid = new THREE.GridHelper(22, 22, 0x003a55, 0x001022);
+  grid.rotateX(Math.PI/2);
+  scene.add(grid);
+
+  /**
+   * =========================================================
+   * 4) FIELD — Nanbu Iron Field (rule, not texture)
+   * =========================================================
+   */
+  const FIELD = {
+    kBase1: 0.9,
+    kBase2: 1.3,
+    microBase: 0.65,
+    strengthBase: 0.035,
+    strengthWind: 0.06,
+    calmMax: 0.85,
+  };
+
+  function nanbuField(px, py, pz, time, ironN, windN, calmN, solidN){
+    // calm: 観測で静まる（逆説）
+    const chaos = 1 - calmN;
+
+    // solid: 固化が進むほど“微歪み”が固定され、揺れは減る（ただし0にはしない）
+    const mobility = 1 - solidN * 0.75;
+
+    // “型”：周期（固化が進むほど型が前に出る）
+    const k1 = FIELD.kBase1 + ironN * (1.2 + 0.4*solidN);
+    const k2 = FIELD.kBase2 + ironN * (1.4 + 0.4*solidN);
+
+    // “砂/手”：微歪み（固化が進むほど時間変動は減る＝固定化）
+    const micro = FIELD.microBase * ironN * (0.22 + 0.78*chaos) * (0.45 + 0.55*mobility);
+    const wob = (0.35 + windN*0.9) * chaos * (0.30 + 0.70*mobility);
+
+    const a = Math.sin(px*k1 + Math.sin(py*0.7)*micro) * Math.cos(py*k1 + Math.sin(pz*0.6)*micro);
+    const b = Math.sin(py*k2 + Math.sin(px*0.5)*micro) * Math.cos(pz*k2 + Math.sin(py*0.4)*micro);
+    const c = Math.sin(pz*(k1+0.3) + Math.sin(px*0.6)*micro) * Math.cos(px*(k2-0.2) + Math.sin(pz*0.5)*micro);
+
+    const vx = (b - c);
+    const vy = (c - a);
+    const vz = (a - b);
+
+    const drift = wob * 0.35 * Math.sin(time*(0.45 + windN) + px*0.1);
+
+    return { x: vx + drift, y: vy - drift*0.6, z: vz + drift*0.2 };
   }
 
-  function findClosestHourIndex(times, now = new Date()) {
-    const nowMs = now.getTime();
-    let bestIdx = 0;
-    let bestDiff = Infinity;
-    for (let i = 0; i < times.length; i++) {
-      const t = Date.parse(times[i]);
-      if (!Number.isFinite(t)) continue;
-      const diff = Math.abs(t - nowMs);
-      if (diff < bestDiff) {
-        bestDiff = diff;
-        bestIdx = i;
-      }
-    }
-    return bestIdx;
+  /**
+   * =========================================================
+   * 5) TRACE — particles + irreversible trace
+   * =========================================================
+   */
+  const TRACE = {
+    particleCount: 2600,
+    particleSize: 0.028,
+    trailMax: 5200,
+    trailDissolveBase: 0.99935, // 染み込み（基準）
+    x:0, y:0, z:0,
+    head:0,
+  };
+
+  // seed by date + place => "today's Morioka"
+  const seedStr = new Date().toISOString().slice(0,10) + "_" + ENV.lat.toFixed(2) + "_" + ENV.lon.toFixed(2);
+  let seed = 0;
+  for(let i=0;i<seedStr.length;i++) seed = (seed*31 + seedStr.charCodeAt(i)) >>> 0;
+  function seededRand(){
+    seed ^= seed << 13; seed ^= seed >>> 17; seed ^= seed << 5;
+    return (seed >>> 0) / 4294967295;
+  }
+  TRACE.x = (seededRand()-0.5)*0.2;
+  TRACE.y = (seededRand()-0.5)*0.2;
+  TRACE.z = (seededRand()-0.5)*0.2;
+
+  const pGeo = new THREE.BufferGeometry();
+  const pPos = new Float32Array(TRACE.particleCount * 3);
+  for(let i=0;i<TRACE.particleCount;i++){
+    const b=i*3;
+    pPos[b+0]=(Math.random()-0.5)*20;
+    pPos[b+1]=(Math.random()-0.5)*20;
+    pPos[b+2]=(Math.random()-0.5)*10;
+  }
+  pGeo.setAttribute("position", new THREE.BufferAttribute(pPos, 3));
+  const particles = new THREE.Points(
+    pGeo,
+    new THREE.PointsMaterial({ color:0x00f2ff, size:TRACE.particleSize, transparent:true, opacity:0.48 })
+  );
+  scene.add(particles);
+
+  const trail = new Float32Array(TRACE.trailMax * 3);
+  const trailGeo = new THREE.BufferGeometry();
+  trailGeo.setAttribute("position", new THREE.BufferAttribute(trail, 3));
+  const trailMat = new THREE.LineBasicMaterial({ color:0x00f2ff, transparent:true, opacity:0.75 });
+  const attractor = new THREE.Line(trailGeo, trailMat);
+  scene.add(attractor);
+
+  /**
+   * =========================================================
+   * 6) SOUND — subtle drone (field presence)
+   * =========================================================
+   */
+  const SOUND = {
+    started:false, ctx:null, master:null, filter:null, osc1:null, osc2:null, noise:null,
+    maxGain:0.12
+  };
+
+  function startAudio(){
+    if(SOUND.started) return;
+
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const master = ctx.createGain();
+    master.gain.value = 0.0;
+    master.connect(ctx.destination);
+
+    const filter = ctx.createBiquadFilter();
+    filter.type="lowpass";
+    filter.frequency.value=500;
+    filter.Q.value=0.9;
+    filter.connect(master);
+
+    const osc1 = ctx.createOscillator();
+    osc1.type="sine";
+    osc1.frequency.value=55;
+    osc1.connect(filter);
+    osc1.start();
+
+    const osc2 = ctx.createOscillator();
+    osc2.type="triangle";
+    osc2.frequency.value=110;
+    osc2.connect(filter);
+    osc2.start();
+
+    const bufferSize = 2 * ctx.sampleRate;
+    const noiseBuffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
+    const out = noiseBuffer.getChannelData(0);
+    for(let i=0;i<bufferSize;i++) out[i] = (Math.random()*2-1) * 0.18;
+
+    const noise = ctx.createBufferSource();
+    noise.buffer=noiseBuffer;
+    noise.loop=true;
+    noise.connect(filter);
+    noise.start();
+
+    SOUND.started=true;
+    SOUND.ctx=ctx; SOUND.master=master; SOUND.filter=filter;
+    SOUND.osc1=osc1; SOUND.osc2=osc2; SOUND.noise=noise;
+
+    master.gain.linearRampToValueAtTime(SOUND.maxGain*0.8, ctx.currentTime + 1.2);
+  }
+  window.addEventListener("pointerdown", startAudio, { once:true });
+
+  /**
+   * =========================================================
+   * 7) IRON — internal density (馴染む)
+   * =========================================================
+   */
+  const IRON = { target:0.55, value:0.55 };
+
+  function updateIronTarget(){
+    const wn = windN();
+    const tn = tempN();
+    const tension = 1 - Math.abs(tn - 0.5) * 2; // 中庸で高い
+    IRON.target = 0.35 + 0.45 * (0.55*wn + 0.45*tension);
   }
 
-  // =========================
-  // Data fetch
-  // =========================
-  async function fetchRealData() {
-    setStatus("STATUS: CONNECTING TO TAISHO...", (isTideLive || isWindLive) ? "LIVE" : "SIM");
+  /**
+   * =========================================================
+   * 8) SOLIDIFY — the one-way process (鋳造の矢印)
+   * ---------------------------------------------------------
+   * - 時間が進むほど固まる（不可逆）
+   * - 風は風化（わずかに削る）が、戻しはしない
+   * - 固まるほど、場の“動き”は減り、痕跡は染み込みやすくなる
+   * =========================================================
+   */
+  const SOLID = {
+    value: 0.0,               // 0..1
+    // 固化速度（ゆっくり：展示でも“生きてる”けど、確実に矢印がある）
+    rate: 0.00006,            // 基本固化
+    // 風化（風が強いとわずかに削る＝完全固定しない）
+    weather: 0.00003,         // 風化係数
+  };
 
-    // 1) Tide
-    try {
-      const urlTide =
-        `https://marine-api.open-meteo.com/v1/marine?latitude=${LAT}&longitude=${LON}&hourly=tide_height`;
-      const data = await fetchJsonWithTimeout(urlTide, FETCH_TIMEOUT_MS);
+  function updateSolidify(wn){
+    // 固化（1に近づく）：不可逆の矢印
+    const grow = (1 - SOLID.value) * SOLID.rate;
 
-      const times = data?.hourly?.time;
-      const tides = data?.hourly?.tide_height;
+    // 風化：風が強いほど、固まったものがほんの少しだけ削られる（戻すではない）
+    const erode = SOLID.value * (SOLID.weather * wn);
 
-      if (Array.isArray(times) && Array.isArray(tides) && times.length && tides.length) {
-        const idx = findClosestHourIndex(times, new Date());
-        const tideM = Number(tides[idx]);
-        if (Number.isFinite(tideM)) {
-          targetTideCm = tideM * 100;   // ★ 目標値だけ更新（表示は追従）
-          isTideLive = true;
-        } else {
-          isTideLive = false;
-        }
-      } else {
-        isTideLive = false;
-      }
-    } catch (e) {
-      console.error("Tide fetch error:", e);
-      isTideLive = false;
-    }
-
-    // 2) Wind
-    try {
-      const urlWind =
-        `https://api.open-meteo.com/v1/forecast?latitude=${LAT}&longitude=${LON}&current=wind_speed_10m&wind_speed_unit=${WIND_UNIT}`;
-      const data = await fetchJsonWithTimeout(urlWind, FETCH_TIMEOUT_MS);
-
-      const w = Number(data?.current?.wind_speed_10m);
-      if (Number.isFinite(w)) {
-        liveWindMs = w;
-        isWindLive = true;
-      } else {
-        isWindLive = false;
-      }
-    } catch (e) {
-      console.error("Wind fetch error:", e);
-      isWindLive = false;
-    }
-
-    // status update
-    lastUpdateStr = nowHHMM();
-    const mode = (isTideLive && isWindLive) ? "FULL LIVE" : (isTideLive || isWindLive) ? "PARTIAL LIVE" : "SIM";
-
-    if (mode === "FULL LIVE") {
-      setStatus("STATUS: FULL LIVE DATA ACTIVE", "LIVE");
-      $status.style.color = "#00f2ff";
-    } else if (mode === "PARTIAL LIVE") {
-      setStatus("STATUS: PARTIAL LIVE (FALLBACK MIX)", "MIX");
-      $status.style.color = "#00f2ff";
-    } else {
-      setStatus("STATUS: SIMULATION MODE (NO DATA)", "SIM");
-      $status.style.color = "#00f2ff";
-    }
+    SOLID.value = clamp01(SOLID.value + grow - erode);
   }
 
-  // =========================
-  // Animation loop
-  // =========================
-  function animate() {
+  /**
+   * =========================================================
+   * 9) Main loop
+   * =========================================================
+   */
+  function animate(){
     requestAnimationFrame(animate);
-
     const time = Date.now() * 0.001;
 
-    // --- Tide (LIVEは追従 / SIMはサイン波) ---
-    let currentTideCm;
-    if (isTideLive) {
-      // ★ サイン波みたいな一定速度じゃなく、「目標値に向かって寄る」動きになる
-      displayTideCm += (targetTideCm - displayTideCm) * TIDE_FOLLOW;
-      currentTideCm = displayTideCm;
-    } else {
-      currentTideCm = sim.tideBase + Math.sin(time * sim.tideFreq) * sim.tideAmp;
-      displayTideCm = currentTideCm;
-    }
+    const prox = proximityToCenter();
+    OBS.proximity = prox;
 
-    $tide.textContent = `TIDE: ${currentTideCm.toFixed(1)} cm` + (isTideLive ? " (LIVE)" : " (SIM)");
+    const calmN = clamp01(prox * FIELD.calmMax);
+    const chaosN = 1 - calmN;
 
-    // --- Wind ---
-    $wind.textContent = `WIND: ${liveWindMs.toFixed(1)} m/s` + (isWindLive ? " (LIVE)" : " (SIM)");
+    const wn = windN();
 
-    // --- Core reacts to tide ---
-    const scale = CORE_SCALE_BASE + (currentTideCm / CORE_SCALE_TIDE_DIV);
-    core.scale.setScalar(scale);
-    core.rotation.y += 0.01;
-    core.rotation.x += 0.002;
+    // iron（馴染む）
+    updateIronTarget();
+    IRON.value += (IRON.target - IRON.value) * 0.03;
+    const ironN = clamp01(IRON.value);
 
-    // --- Particles react to wind ---
+    // solidify（矢印）
+    updateSolidify(wn);
+    const solidN = SOLID.value;
+
+    // === Particles advected by Field ===
     const pos = particles.geometry.attributes.position.array;
-    const speed = (isWindLive ? (liveWindMs * PARTICLE_WIND_SPEED_FACTOR) : PARTICLE_BASE_SPEED);
 
-    for (let i = 0; i < pCount; i++) {
-      const base = i * 3;
-      pos[base + 0] -= speed;
-      if (pos[base + 0] < -10) pos[base + 0] = 10;
+    // 固まるほど“流動”が減る（ただしゼロにしない）
+    const mobility = 1 - solidN * 0.78;
+
+    // 風で動く／近づくと静まる／固化でさらに動かなくなる
+    const fieldStrength =
+      (FIELD.strengthBase + FIELD.strengthWind * wn)
+      * (0.55 + 0.9 * chaosN)
+      * (0.35 + 0.65 * mobility); // 固化が進むほど下がる
+
+    for(let i=0;i<TRACE.particleCount;i++){
+      const b=i*3;
+
+      const px = pos[b+0] * 0.12;
+      const py = pos[b+1] * 0.12;
+      const pz = pos[b+2] * 0.12;
+
+      const v = nanbuField(px, py, pz, time, ironN, wn, calmN, solidN);
+
+      pos[b+0] += v.x * fieldStrength;
+      pos[b+1] += v.y * fieldStrength;
+      pos[b+2] += v.z * fieldStrength * 0.6;
+
+      // wrap
+      if(pos[b+0] < -10) pos[b+0] = 10;
+      if(pos[b+0] >  10) pos[b+0] = -10;
+      if(pos[b+1] < -10) pos[b+1] = 10;
+      if(pos[b+1] >  10) pos[b+1] = -10;
+      if(pos[b+2] < -5)  pos[b+2] = 5;
+      if(pos[b+2] >  5)  pos[b+2] = -5;
     }
     particles.geometry.attributes.position.needsUpdate = true;
+
+    // === Irreversible trace (dissolve into field) ===
+    // 固化が進むほど、痕跡が“染み込みやすい”（= 消えにくい）
+    const dissolve = TRACE.trailDissolveBase + solidN * 0.00025; // 1に近づく
+    for(let i=0;i<trail.length;i++) trail[i] *= dissolve;
+
+    // Lorenz-like breath: wind -> agitation, iron -> folding, observer -> calm, solid -> stabilization
+    const sigma = (10 + 6*wn*chaosN) * (1 - solidN*0.55);
+    const rho   = (28 + 18*ironN*chaosN) * (1 - solidN*0.25);
+    const beta  = (8/3) + Math.sin(time * 0.11) * (0.08 * chaosN) * (1 - solidN*0.6);
+
+    const dt = (0.006 + 0.010*wn) * (0.55 + 0.9*chaosN) * (0.35 + 0.65*mobility);
+
+    const dx = sigma * (TRACE.y - TRACE.x);
+    const dy = TRACE.x * (rho - TRACE.z) - TRACE.y;
+    const dz = TRACE.x * TRACE.y - beta * TRACE.z;
+
+    // “砂”の微小歪み：固化で時間変動は減る（固定化）
+    const micro = (ironN * 0.006) * chaosN * (0.30 + 0.70*mobility);
+
+    TRACE.x += dx * dt + (Math.sin(time * 0.9 + TRACE.x * 3.0) * micro);
+    TRACE.y += dy * dt + (Math.sin(time * 0.7 + TRACE.y * 2.2) * micro);
+    TRACE.z += dz * dt + (Math.sin(time * 0.8 + TRACE.z * 1.8) * micro);
+
+    // write trace
+    const S = 0.075 + ironN*0.07;
+    trail[TRACE.head*3 + 0] = TRACE.x * S;
+    trail[TRACE.head*3 + 1] = TRACE.y * S;
+    trail[TRACE.head*3 + 2] = (TRACE.z - 25) * S;
+
+    TRACE.head = (TRACE.head + 1) % TRACE.trailMax;
+    trailGeo.attributes.position.needsUpdate = true;
+
+    // 近いほど囁き／固化が進むほど“薄いのに残る”方向へ
+    attractor.material.opacity = (0.14 + 0.64*chaosN) * (0.85 - 0.25*solidN);
+
+    // === Sound ===
+    if(SOUND.started){
+      // 固化が進むほど揺れが減り、音が“安定”する
+      const wobble = (0.22 + wn*0.85) * chaosN * (1 - solidN*0.65);
+      const ironTone = 0.6 + ironN*0.8;
+
+      SOUND.osc1.frequency.value = 48 * ironTone + Math.sin(time * 0.9) * (2.2 * wobble);
+      SOUND.osc2.frequency.value = 96 * ironTone + Math.sin(time * 0.6) * (3.1 * wobble);
+
+      // close => inner / muffled（固化が進むほどさらに内側へ）
+      SOUND.filter.frequency.value = (220 + 1500 * chaosN) * (0.85 - 0.25*solidN);
+
+      // close => whisper
+      SOUND.master.gain.value = 0.04 + SOUND.maxGain * (0.75 * chaosN);
+    }
 
     controls.update();
     renderer.render(scene, camera);
   }
 
-  // =========================
   // Boot
-  // =========================
-  setStatus("STATUS: BOOTING...", "SIM");
-  animate();        // 先に回す（fetch失敗でも止まらない）
-  fetchRealData();  // 初回取得
-  setInterval(fetchRealData, FETCH_INTERVAL_MS);
+  (async function boot(){
+    await refreshEnvironment();
+    setInterval(refreshEnvironment, ENV.interval_ms);
+    animate();
+  })();
 
 })();
 </script>
