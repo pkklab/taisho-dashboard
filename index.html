@@ -8,7 +8,6 @@
     html, body { margin:0; height:100%; background:#0b0b0b; overflow:hidden; }
     canvas { display:block; width:100vw; height:100vh; }
 
-    /* LIVE/SIM の刻印（説明しないが、ひと目で判別） */
     #stamp{
       position:fixed; left:12px; top:10px;
       font-family: ui-monospace, Menlo, Monaco, "Courier New", monospace;
@@ -29,7 +28,6 @@
     }
     #stamp small{ opacity:0.65; margin-left:6px; }
 
-    /* 何か落ちたら表示する（公共空間向けの保険） */
     #err{
       position:fixed; left:12px; bottom:12px; right:12px;
       font-family: ui-monospace, Menlo, Monaco, "Courier New", monospace;
@@ -52,6 +50,7 @@
 
 <script>
 (() => {
+  // ---------- error overlay ----------
   const errBox = document.getElementById("err");
   function showErr(msg){
     errBox.style.display = "block";
@@ -72,32 +71,32 @@
 
   const simCanvas = document.createElement("canvas");
   const sctx = simCanvas.getContext("2d");
+
   let simW = 260, simH = 160;
-  let img, pix;
-
-  function resize(){
-    const dpr = Math.min(window.devicePixelRatio || 1, 2);
-    canvas.width  = Math.floor(window.innerWidth  * dpr);
-    canvas.height = Math.floor(window.innerHeight * dpr);
-
-    const area = window.innerWidth * window.innerHeight;
-    const scale = area > 1500000 ? 1.15 : area < 650000 ? 0.90 : 1.0;
-    simW = Math.max(180, Math.floor(260 * scale));
-    simH = Math.max(120, Math.floor(160 * scale));
-
-    simCanvas.width = simW;
-    simCanvas.height = simH;
-    img = sctx.createImageData(simW, simH);
-    pix = img.data;
-
-    allocFields();
-    seedAsAlreadyHere();
-  }
-  window.addEventListener("resize", resize, { passive:true });
-  resize();
+  let img = null, pix = null;
 
   // =========================================================
-  // 1) ENV (live or sim) — Morioka default
+  // 1) Fields — 先に宣言しておく（これが今回の修正点）
+  // =========================================================
+  let soot = new Float32Array(0);
+  let wet  = new Float32Array(0);
+  let scar = new Float32Array(0);
+  let tmpSoot = new Float32Array(0);
+  let tmpWet  = new Float32Array(0);
+  let tmpScar = new Float32Array(0);
+
+  function allocFields(){
+    const n = simW * simH;
+    soot = new Float32Array(n);
+    wet  = new Float32Array(n);
+    scar = new Float32Array(n);
+    tmpSoot = new Float32Array(n);
+    tmpWet  = new Float32Array(n);
+    tmpScar = new Float32Array(n);
+  }
+
+  // =========================================================
+  // 2) ENV
   // =========================================================
   const ENV = {
     name: "MORIOKA",
@@ -168,14 +167,13 @@
   }
 
   function envWindN(){ return clamp01(ENV.wind_ms / 14); }
-  function envHumN(){  return clamp01((ENV.humidity - 30) / 60); } // 30..90
-  function envPreN(){  return clamp01(ENV.precip_mm / 2.0); }     // 0..2mm/h
+  function envHumN(){  return clamp01((ENV.humidity - 30) / 60); }
+  function envPreN(){  return clamp01(ENV.precip_mm / 2.0); }
 
   // =========================================================
-  // 2) Noise (BigIntなし、確実に動く hash)
+  // 3) Noise
   // =========================================================
   function hash2D(x,y,seed){
-    // すべて number で完結
     let h = (x|0) * 374761393 + (y|0) * 668265263 + (seed|0) * 144269;
     h = (h ^ (h >>> 13)) * 1274126177;
     h = (h ^ (h >>> 16)) >>> 0;
@@ -198,26 +196,14 @@
 
     const ab = a + (b-a)*u;
     const cd = c + (d-c)*u;
-    return ab + (cd-ab)*v; // 0..1
+    return ab + (cd-ab)*v;
   }
 
   // =========================================================
-  // 3) Fields — soot / wet / scar
+  // 4) Seed — “ずっとそこにあった”
   // =========================================================
-  let soot, wet, scar, tmpSoot, tmpWet, tmpScar;
-
-  function allocFields(){
-    const n = simW*simH;
-    soot = new Float32Array(n);
-    wet  = new Float32Array(n);
-    scar = new Float32Array(n);
-    tmpSoot = new Float32Array(n);
-    tmpWet  = new Float32Array(n);
-    tmpScar = new Float32Array(n);
-  }
-
   function seedAsAlreadyHere(){
-    if(!soot) return;
+    // ここで soot が未確保だと真っ暗になるので、確保済み前提にする
     for(let y=0; y<simH; y++){
       for(let x=0; x<simW; x++){
         const i = y*simW + x;
@@ -237,7 +223,31 @@
   }
 
   // =========================================================
-  // 4) Dynamics
+  // 5) Resize — ここで alloc -> seed を必ずやる
+  // =========================================================
+  function resize(){
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    canvas.width  = Math.floor(window.innerWidth  * dpr);
+    canvas.height = Math.floor(window.innerHeight * dpr);
+
+    const area = window.innerWidth * window.innerHeight;
+    const scale = area > 1500000 ? 1.15 : area < 650000 ? 0.90 : 1.0;
+    simW = Math.max(180, Math.floor(260 * scale));
+    simH = Math.max(120, Math.floor(160 * scale));
+
+    simCanvas.width = simW;
+    simCanvas.height = simH;
+    img = sctx.createImageData(simW, simH);
+    pix = img.data;
+
+    allocFields();
+    seedAsAlreadyHere();
+  }
+  window.addEventListener("resize", resize, { passive:true });
+  resize(); // 初回もここで全部初期化される
+
+  // =========================================================
+  // 6) Dynamics
   // =========================================================
   const STATE = {
     wetGlobal: 0.28,
@@ -376,7 +386,7 @@
   }
 
   // =========================================================
-  // 5) Render (低コントラスト・発光なし・端で消す)
+  // 7) Render
   // =========================================================
   const PALETTE = {
     baseR: 226, baseG: 218, baseB: 205,
@@ -445,7 +455,7 @@
   }
 
   // =========================================================
-  // 6) Loop
+  // 8) Loop
   // =========================================================
   let last = performance.now();
   function loop(now){
@@ -461,7 +471,7 @@
   }
 
   // =========================================================
-  // 7) Boot
+  // 9) Boot
   // =========================================================
   (async function boot(){
     updateStamp();
